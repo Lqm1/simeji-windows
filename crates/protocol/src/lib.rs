@@ -20,9 +20,24 @@ pub struct Conversion {
     pub clauses: Vec<Clause>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudWord {
+    pub text: String,
+    pub reading: String,
+    pub property: u32,
+    pub kind: u32,
+    pub scene: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     Ping,
+    QueueCloud {
+        reading: String,
+    },
+    PollCloud {
+        reading: String,
+    },
     Transliterate {
         romaji: String,
     },
@@ -45,6 +60,8 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Ready,
+    CloudCandidates(Vec<CloudWord>),
+    CloudEnabled(bool),
     Text(String),
     Conversion(Conversion),
     Candidates(Vec<Candidate>),

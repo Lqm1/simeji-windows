@@ -1,15 +1,17 @@
 use crate::Lifetime;
-use simeji_protocol::{Candidate, Clause, Request, Response};
+use simeji_protocol::{Candidate, Clause, CloudWord, Request, Response};
 use std::{
     cell::{Cell, RefCell},
+    collections::BTreeMap,
     mem::ManuallyDrop,
-    rc::Rc,
+    rc::{Rc, Weak},
     time::Duration,
 };
 use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
+        System::Com::CoTaskMemFree,
         UI::{Input::KeyboardAndMouse::*, TextServices::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -18,6 +20,97 @@ use windows::{
 fn worker(request: &Request) -> Result<Response> {
     simeji_transport::exchange(request, Duration::from_secs(2))
         .map_err(|e| Error::new(E_FAIL, e.to_string()))
+}
+
+#[derive(Clone)]
+struct Choice {
+    candidate: Candidate,
+    whole_sentence: bool,
+}
+
+thread_local! {
+    static TIMERS: RefCell<BTreeMap<usize, Weak<RefCell<State>>>> = const { RefCell::new(BTreeMap::new()) };
+}
+struct CloudTimer(usize);
+impl CloudTimer {
+    fn start(state: &Rc<RefCell<State>>) -> Option<Self> {
+        let id = unsafe { SetTimer(None, 0, 150, Some(poll_cloud)) };
+        if id == 0 {
+            return None;
+        }
+        TIMERS.with(|timers| timers.borrow_mut().insert(id, Rc::downgrade(state)));
+        Some(Self(id))
+    }
+}
+impl Drop for CloudTimer {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = KillTimer(None, self.0);
+        }
+        TIMERS.with(|timers| timers.borrow_mut().remove(&self.0));
+    }
+}
+unsafe extern "system" fn poll_cloud(_window: HWND, _message: u32, id: usize, _time: u32) {
+    let state = TIMERS.with(|timers| timers.borrow().get(&id).and_then(Weak::upgrade));
+    let Some(state) = state else {
+        return;
+    };
+    let reading = {
+        let Ok(state) = state.try_borrow() else {
+            return;
+        };
+        if !state.cloud_enabled
+            || !state.public_input
+            || state.raw.is_empty()
+            || !state.clauses.is_empty()
+            || !state.cloud_words.is_empty()
+        {
+            return;
+        }
+        state.reading.clone()
+    };
+    // Polling never performs HTTP and cannot stall the host for an engine call.
+    let response = simeji_transport::exchange::<_, Response>(
+        &Request::PollCloud {
+            reading: reading.clone(),
+        },
+        Duration::from_millis(20),
+    );
+    if let Ok(Response::CloudCandidates(words)) = response
+        && let Ok(mut state) = state.try_borrow_mut()
+        && state.public_input
+        && state.reading == reading
+        && state.clauses.is_empty()
+    {
+        state.cloud_words = words;
+    }
+}
+
+fn public_input(context: &ITfContext, cookie: u32, range: &ITfRange) -> Result<bool> {
+    unsafe {
+        let value = context
+            .GetProperty(&GUID_PROP_INPUTSCOPE)?
+            .GetValue(cookie, range)?;
+        if value.is_empty() {
+            return Ok(true);
+        }
+        let unknown = IUnknown::try_from(&value)?;
+        let scope: ITfInputScope = unknown.cast()?;
+        let mut scopes = std::ptr::null_mut();
+        let mut count = 0;
+        scope.GetInputScopes(&mut scopes, &mut count)?;
+        let allowed = if count == 0 {
+            true
+        } else if scopes.is_null() || count > 64 {
+            false
+        } else {
+            !std::slice::from_raw_parts(scopes, count as usize)
+                .iter()
+                .any(|scope| matches!(scope.0, 31 | 61 | 63..=66))
+        };
+        CoTaskMemFree(Some(scopes.cast()));
+        Ok(allowed)
+    }
 }
 
 #[derive(Default)]
@@ -36,7 +129,7 @@ impl Popup {
         &mut self,
         parent: HWND,
         rect: RECT,
-        choices: &[Candidate],
+        choices: &[Choice],
         selected: usize,
     ) -> Result<()> {
         if choices.is_empty() {
@@ -54,7 +147,12 @@ impl Popup {
                     "{} {}  {}",
                     if i == selected { "▶" } else { "  " },
                     i - first + 1,
-                    c.text
+                    c.candidate
+                        .text
+                        .chars()
+                        .take(36)
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect::<String>()
                 )
             })
             .collect::<Vec<_>>()
@@ -118,7 +216,11 @@ struct State {
     reading: String,
     clauses: Vec<Clause>,
     focus: usize,
-    choices: Vec<Candidate>,
+    choices: Vec<Choice>,
+    cloud_text: Option<String>,
+    public_input: bool,
+    cloud_words: Vec<CloudWord>,
+    cloud_enabled: bool,
     selected: usize,
     accepted: Option<Candidate>,
     composition: Option<ITfComposition>,
@@ -133,10 +235,16 @@ impl State {
         self.choices.clear();
         self.selected = 0;
         self.accepted = None;
+        self.cloud_text = None;
+        self.public_input = false;
+        self.cloud_words.clear();
         self.composition = None;
         self.popup.hide();
     }
     fn text(&self) -> String {
+        if let Some(text) = &self.cloud_text {
+            return text.clone();
+        }
         if self.clauses.is_empty() {
             self.reading.clone()
         } else {
@@ -151,6 +259,7 @@ pub(crate) struct TextService {
     manager: RefCell<Option<ITfThreadMgr>>,
     client: Cell<u32>,
     enabled: Cell<bool>,
+    cloud_timer: RefCell<Option<CloudTimer>>,
     _lifetime: Lifetime,
 }
 impl TextService {
@@ -160,6 +269,7 @@ impl TextService {
             manager: RefCell::new(None),
             client: Cell::new(0),
             enabled: Cell::new(true),
+            cloud_timer: RefCell::new(None),
             _lifetime: Lifetime::new(),
         }
     }
@@ -174,9 +284,11 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         }
         self.client.set(client);
         *self.manager.borrow_mut() = Some(manager.clone());
+        *self.cloud_timer.borrow_mut() = CloudTimer::start(&self.state);
         Ok(())
     }
     fn Deactivate(&self) -> Result<()> {
+        self.cloud_timer.borrow_mut().take();
         if let Some(manager) = self.manager.borrow_mut().take() {
             let keys: ITfKeystrokeMgr = manager.cast()?;
             unsafe {
@@ -235,10 +347,45 @@ impl TextService_Impl {
         };
         match worker(&Request::Candidates { reading, context })? {
             Response::Candidates(choices) => {
+                let reading = self.state.borrow().reading.clone();
+                let cloud = self.state.borrow().cloud_words.clone();
+                let mut choices = choices
+                    .into_iter()
+                    .map(|candidate| Choice {
+                        candidate,
+                        whole_sentence: false,
+                    })
+                    .collect::<Vec<_>>();
+                let mut tail = Vec::new();
+                for word in cloud.into_iter().filter(|w| w.scene.is_empty()) {
+                    if choices
+                        .iter()
+                        .chain(tail.iter())
+                        .any(|c: &Choice| c.candidate.text == word.text)
+                    {
+                        continue;
+                    }
+                    tail.push(Choice {
+                        candidate: Candidate {
+                            text: word.text,
+                            reading: reading.clone(),
+                            property: word.property,
+                            left_id: 0,
+                            right_id: 0,
+                        },
+                        whole_sentence: true,
+                    });
+                }
+                let rest = tail.split_off(tail.len().min(6));
+                let position = choices.len().min(1);
+                choices.splice(position..position, tail);
+                choices.extend(rest);
                 let mut state = self.state.borrow_mut();
                 state.selected = choices
                     .iter()
-                    .position(|c| c.text == state.clauses[state.focus].text)
+                    .position(|c| {
+                        !c.whole_sentence && c.candidate.text == state.clauses[state.focus].text
+                    })
                     .unwrap_or(0);
                 state.choices = choices;
                 Ok(())
@@ -248,7 +395,14 @@ impl TextService_Impl {
         }
     }
     fn commit(&self, context: &ITfContext) -> Result<()> {
-        let candidate = self.state.borrow().accepted.clone();
+        let candidate = {
+            let state = self.state.borrow();
+            if state.public_input {
+                state.accepted.clone()
+            } else {
+                None
+            }
+        };
         self.edit(context, true, false)?;
         if let Some(candidate) = candidate {
             // Keep execution on the COM apartment: a detached thread could
@@ -306,6 +460,7 @@ impl TextService_Impl {
                 state.clauses.clear();
                 state.choices.clear();
                 state.accepted = None;
+                state.cloud_text = None;
                 drop(state);
                 self.edit(context, false, false)?;
             }
@@ -374,6 +529,7 @@ impl TextService_Impl {
             state.clauses.clear();
             state.choices.clear();
             state.accepted = None;
+            state.cloud_text = None;
         } else {
             if !self.state.borrow().clauses.is_empty() {
                 self.commit(context)?;
@@ -411,7 +567,20 @@ impl TextService_Impl {
             Response::Error(error) => return Err(Error::new(E_FAIL, error)),
             _ => return Err(E_UNEXPECTED.into()),
         }
+        self.state.borrow_mut().cloud_words.clear();
         self.edit(context, false, false)?;
+        let reading = {
+            let state = self.state.borrow();
+            if state.public_input {
+                state.reading.clone()
+            } else {
+                String::new()
+            }
+        };
+        self.state.borrow_mut().cloud_enabled = matches!(
+            worker(&Request::QueueCloud { reading }),
+            Ok(Response::CloudEnabled(true))
+        );
         Ok(true.into())
     }
     fn select(&self, step: isize) -> Result<()> {
@@ -421,7 +590,14 @@ impl TextService_Impl {
         }
         state.selected =
             (state.selected as isize + step).rem_euclid(state.choices.len() as isize) as usize;
-        let candidate = state.choices[state.selected].clone();
+        let choice = state.choices[state.selected].clone();
+        let candidate = choice.candidate;
+        if choice.whole_sentence {
+            state.cloud_text = Some(candidate.text);
+            state.accepted = None;
+            return Ok(());
+        }
+        state.cloud_text = None;
         let focus = state.focus;
         state.clauses[focus].text = candidate.text.clone();
         state.accepted = Some(candidate);
@@ -431,7 +607,10 @@ impl TextService_Impl {
 impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
         if !foreground.as_bool() {
-            self.state.borrow().popup.hide();
+            let mut state = self.state.borrow_mut();
+            state.popup.hide();
+            state.public_input = false;
+            state.cloud_words.clear();
         }
         Ok(())
     }
@@ -494,6 +673,8 @@ impl ITfEditSession_Impl for Edit_Impl {
         };
         unsafe {
             let range = composition.GetRange()?;
+            let public = public_input(&self.context, cookie, &range).unwrap_or(false);
+            self.state.borrow_mut().public_input = public;
             range.SetText(cookie, 0, &self.text.encode_utf16().collect::<Vec<_>>())?;
             let caret = range.Clone()?;
             caret.Collapse(cookie, TF_ANCHOR_END)?;
