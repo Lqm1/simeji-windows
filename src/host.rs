@@ -16,6 +16,165 @@ const HEAP: u32 = 0x1000_0000;
 const HEAP_END: u32 = 0x2000_0000;
 const MAX_TRANSFER: u32 = 64 * 1024 * 1024;
 
+enum Arguments {
+    Frame {
+        registers: [u32; 4],
+        index: usize,
+        stack: u32,
+    },
+    List(u32),
+}
+impl Arguments {
+    fn next(&mut self, u: &Guest<'_>, wide: bool) -> Result<u64, ArmError> {
+        match self {
+            Self::List(p) => {
+                if wide {
+                    *p = (*p + 7) & !7;
+                }
+                let lo = word(u, *p)?;
+                *p += 4;
+                if wide {
+                    let hi = word(u, *p)?;
+                    *p += 4;
+                    Ok(u64::from(lo) | (u64::from(hi) << 32))
+                } else {
+                    Ok(u64::from(lo))
+                }
+            }
+            Self::Frame {
+                registers,
+                index,
+                stack,
+            } => {
+                if wide {
+                    *index = (*index + 1) & !1;
+                }
+                let mut value = 0;
+                for shift in 0..if wide { 2 } else { 1 } {
+                    let n = if *index < 4 {
+                        registers[*index]
+                    } else {
+                        word(u, *stack + (*index as u32 - 4) * 4)?
+                    };
+                    value |= u64::from(n) << (shift * 32);
+                    *index += 1;
+                }
+                Ok(value)
+            }
+        }
+    }
+}
+
+fn formatted(u: &Guest<'_>, format: u32, mut args: Arguments) -> Result<Vec<u8>, ArmError> {
+    let format = string(u, format)?;
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < format.len() {
+        if format[i] != b'%' {
+            out.push(format[i]);
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if format.get(i) == Some(&b'%') {
+            out.push(b'%');
+            i += 1;
+            continue;
+        }
+        let mut left = false;
+        let mut zero = false;
+        while let Some(b) = format.get(i) {
+            match b {
+                b'-' => left = true,
+                b'0' => zero = true,
+                b' ' | b'+' | b'#' => {}
+                _ => break,
+            }
+            i += 1;
+        }
+        let mut width = 0usize;
+        while let Some(b'0'..=b'9') = format.get(i) {
+            width = (width * 10 + usize::from(format[i] - b'0')).min(1024 * 1024);
+            i += 1;
+        }
+        let mut precision = None;
+        if format.get(i) == Some(&b'.') {
+            i += 1;
+            let mut n = 0;
+            while let Some(b'0'..=b'9') = format.get(i) {
+                n = (n * 10 + usize::from(format[i] - b'0')).min(1024);
+                i += 1;
+            }
+            precision = Some(n);
+        }
+        let mut wide = false;
+        if format.get(i) == Some(&b'l') {
+            i += 1;
+            if format.get(i) == Some(&b'l') {
+                wide = true;
+                i += 1;
+            }
+        } else if matches!(format.get(i), Some(b'z' | b't' | b'h')) {
+            i += 1;
+            if format.get(i) == Some(&b'h') {
+                i += 1;
+            }
+        }
+        let spec = *format
+            .get(i)
+            .ok_or_else(|| ArmError::new("Truncated guest format"))?;
+        i += 1;
+        let value = args.next(u, wide || matches!(spec, b'f' | b'g' | b'e'))?;
+        let mut text = match spec {
+            b's' => {
+                if value == 0 {
+                    b"(null)".to_vec()
+                } else {
+                    let mut b = string(u, value as u32)?;
+                    if let Some(n) = precision {
+                        b.truncate(n);
+                    }
+                    b
+                }
+            }
+            b'd' | b'i' => {
+                if wide {
+                    (value as i64).to_string().into_bytes()
+                } else {
+                    (value as i32).to_string().into_bytes()
+                }
+            }
+            b'u' => value.to_string().into_bytes(),
+            b'x' => format!("{value:x}").into_bytes(),
+            b'X' => format!("{value:X}").into_bytes(),
+            b'p' => format!("0x{value:x}").into_bytes(),
+            b'c' => vec![value as u8],
+            b'f' => format!("{:.*}", precision.unwrap_or(6), f64::from_bits(value)).into_bytes(),
+            _ => {
+                return Err(ArmError::new(format!(
+                    "Unsupported guest format specifier: {}",
+                    char::from(spec)
+                )));
+            }
+        };
+        if width > text.len() {
+            let padding = vec![if zero { b'0' } else { b' ' }; width - text.len()];
+            if left {
+                text.extend(padding);
+            } else {
+                let mut padded = padding;
+                padded.extend(text);
+                text = padded;
+            }
+        }
+        out.extend(text);
+        if out.len() > 1024 * 1024 {
+            return Err(ArmError::new("Guest formatted output too large"));
+        }
+    }
+    Ok(out)
+}
+
 pub(crate) fn word(u: &Guest<'_>, p: u32) -> Result<u32, ArmError> {
     let mut b = [0; 4];
     u.mem_read(u64::from(p), &mut b)?;
@@ -194,6 +353,77 @@ impl Host {
         }
         let mut result = 0u32;
         match name {
+            "pow" | "log" | "log10" | "exp" | "sqrt" | "floor" | "ceil" | "round" => {
+                let x = f64::from_bits(u64::from(a[0]) | (u64::from(a[1]) << 32));
+                let y = f64::from_bits(u64::from(a[2]) | (u64::from(a[3]) << 32));
+                let value = match name {
+                    "pow" => x.powf(y),
+                    "log" => x.ln(),
+                    "log10" => x.log10(),
+                    "exp" => x.exp(),
+                    "sqrt" => x.sqrt(),
+                    "floor" => x.floor(),
+                    "ceil" => x.ceil(),
+                    _ => x.round(),
+                }
+                .to_bits();
+                result = value as u32;
+                u.reg_write(RegisterARM::R1, value >> 32)?;
+            }
+            "vsnprintf" | "snprintf" | "sprintf" => {
+                let stack = u.reg_read(RegisterARM::SP)? as u32;
+                let (format, args) = match name {
+                    "vsnprintf" => (a[2], Arguments::List(a[3])),
+                    "snprintf" => (
+                        a[2],
+                        Arguments::Frame {
+                            registers: [a[0], a[1], a[2], a[3]],
+                            index: 3,
+                            stack,
+                        },
+                    ),
+                    _ => (
+                        a[1],
+                        Arguments::Frame {
+                            registers: [a[0], a[1], a[2], a[3]],
+                            index: 2,
+                            stack,
+                        },
+                    ),
+                };
+                let mut text = formatted(u, format, args)?;
+                result = text.len() as u32;
+                if name != "sprintf" {
+                    if a[1] == 0 {
+                        u.reg_write(RegisterARM::R0, u64::from(result))?;
+                        let lr = u.reg_read(RegisterARM::LR)?;
+                        u.reg_write(RegisterARM::PC, lr)?;
+                        return Ok(());
+                    }
+                    text.truncate(a[1] as usize - 1);
+                }
+                text.push(0);
+                u.mem_write(u64::from(a[0]), &text)?;
+            }
+            "rename" => {
+                let from = self.path(u, a[0])?;
+                let to = self.path(u, a[1])?;
+                if !from.starts_with(&self.learn) || !to.starts_with(&self.learn) {
+                    return Err(ArmError::new("Cannot rename dictionary assets"));
+                }
+                if std::fs::rename(from, to).is_err() {
+                    result = u32::MAX;
+                }
+            }
+            "remove" | "unlink" => {
+                let path = self.path(u, a[0])?;
+                if !path.starts_with(&self.learn) {
+                    return Err(ArmError::new("Cannot remove dictionary assets"));
+                }
+                if std::fs::remove_file(path).is_err() {
+                    result = u32::MAX;
+                }
+            }
             "malloc" => result = self.alloc(a[0])?,
             "calloc" => {
                 let n = Self::transfer(a[0], a[1])?;
