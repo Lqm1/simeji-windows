@@ -60,7 +60,6 @@ mod std_string {
     pub const LONG_TEXT: u32 = 8;
 }
 
-/// The engine's candidate list.
 mod candidate_list {
     pub const FAILED: u32 = u32::MAX;
     pub const STATUS: u32 = 0;

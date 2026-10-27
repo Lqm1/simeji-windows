@@ -193,7 +193,6 @@ impl TextService_Impl {
         }
     }
 
-    /// The document of the active composition, if there is one.
     fn composition_context(&self) -> Option<ITfContext> {
         let composition = self.shared.document.borrow().composition.clone()?;
         unsafe { composition.GetRange().and_then(|range| range.GetContext()) }.ok()
