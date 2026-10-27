@@ -1,9 +1,9 @@
-use simeji_windows::engine::Engine;
+use simeji_engine::Engine;
 
 #[test]
 fn converts_readings_with_the_bundled_dictionary() {
     let learn = std::env::temp_dir().join(format!("simeji-conversion-test-{}", std::process::id()));
-    let dict = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dict");
+    let dict = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dict");
     let mut engine = Engine::open(&dict, &learn).unwrap();
     assert_eq!(engine.transliterate("nihongo").unwrap(), "にほんご");
     for (reading, expected) in [

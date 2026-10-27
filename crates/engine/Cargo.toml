@@ -1,0 +1,20 @@
+[package]
+name = "simeji-engine"
+description = "Simeji 23.6.1 conversion engine and dictionaries executed in an ARM emulator"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono.workspace = true
+goblin.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+simeji-protocol.workspace = true
+unicorn-engine.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"

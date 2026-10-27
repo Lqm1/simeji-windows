@@ -1,4 +1,4 @@
-use simeji_windows::engine::Engine;
+use simeji_engine::Engine;
 use std::{error::Error, path::PathBuf};
 
 fn main() -> Result<(), Box<dyn Error>> {

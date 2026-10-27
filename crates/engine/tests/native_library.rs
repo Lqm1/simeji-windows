@@ -1,4 +1,4 @@
-use simeji_windows::elf::LibrarySet;
+use simeji_engine::elf::LibrarySet;
 
 #[test]
 fn executes_utf8_helper_from_the_original_engine() {

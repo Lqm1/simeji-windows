@@ -1,0 +1,20 @@
+[package]
+name = "simeji-worker"
+description = "Conversion worker process, its launcher and the cloud settings tool"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+simeji-engine.workspace = true
+simeji-protocol.workspace = true
+simeji-transport.workspace = true
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"

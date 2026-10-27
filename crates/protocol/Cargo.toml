@@ -1,11 +1,12 @@
 [package]
 name = "simeji-protocol"
-version = "0.1.0"
-edition = "2024"
-publish = false
+description = "Typed requests and responses between the text service and the conversion worker"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [dependencies]
-serde = { version = "1.0", features = ["derive"] }
+serde.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

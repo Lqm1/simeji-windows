@@ -1,4 +1,4 @@
-use simeji_windows::cloud::CloudClient;
+use simeji_worker::cloud::CloudClient;
 use std::{error::Error, path::PathBuf};
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut args = std::env::args().skip(1);

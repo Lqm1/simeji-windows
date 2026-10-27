@@ -22,17 +22,17 @@ const IMPORT_SIZE: u32 = 0x1_0000;
 const LIBRARIES: [(&str, &[u8], u32); 3] = [
     (
         "libc++_shared.so",
-        include_bytes!("../assets/native/libc++_shared.so"),
+        include_bytes!("../../../assets/native/libc++_shared.so"),
         0x3000_0000,
     ),
     (
         "libbaiducmph.so",
-        include_bytes!("../assets/native/libbaiducmph.so"),
+        include_bytes!("../../../assets/native/libbaiducmph.so"),
         0x3100_0000,
     ),
     (
         "libbaiduime.so",
-        include_bytes!("../assets/native/libbaiduime.so"),
+        include_bytes!("../../../assets/native/libbaiduime.so"),
         0x3200_0000,
     ),
 ];

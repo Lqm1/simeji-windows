@@ -4,30 +4,16 @@ use crate::{
     arm::ArmError,
     elf::LibrarySet,
     host::{Host, string, word, write_word},
+    user_dictionary::UserDictionary,
 };
-use serde::{Deserialize, Serialize};
-use std::{
-    cell::RefCell,
-    collections::BTreeMap,
-    io::Write,
-    path::{Path, PathBuf},
-    rc::Rc,
-};
-
-pub use simeji_protocol::{Candidate, Clause, Conversion};
-
-#[derive(Clone, Deserialize, Serialize)]
-struct UserEntry {
-    reading: String,
-    text: String,
-}
+use simeji_protocol::{Candidate, Clause, Conversion};
+use std::{cell::RefCell, collections::BTreeMap, path::Path, rc::Rc};
 
 /// Owns one engine session. Use it on a dedicated worker thread.
 pub struct Engine {
     libraries: LibrarySet,
     host: Rc<RefCell<Host>>,
-    user_words: Vec<UserEntry>,
-    word_path: PathBuf,
+    user_dictionary: UserDictionary,
     faulted: bool,
 }
 
@@ -63,8 +49,7 @@ impl Engine {
         let mut engine = Self {
             libraries,
             host,
-            user_words: Vec::new(),
-            word_path: learning_directory.join("user-dictionary.json"),
+            user_dictionary: UserDictionary::load(learning_directory)?,
             faulted: false,
         };
         for address in engine.libraries.initializers.clone() {
@@ -96,17 +81,8 @@ impl Engine {
         let got = 0x320b_32fau32.wrapping_add(word(u, 0x320b_33fc)?);
         let ready = word(u, got)?;
         u.mem_write(u64::from(ready), &[1])?;
-        if engine.word_path.exists() {
-            if std::fs::metadata(&engine.word_path)?.len() > 4 * 1024 * 1024 {
-                return Err(ArmError::new("User dictionary is too large"));
-            }
-            let bytes = std::fs::read(&engine.word_path)?;
-            let entries: Vec<UserEntry> = serde_json::from_slice(&bytes)
-                .map_err(|e| ArmError::new(format!("Invalid user dictionary: {e}")))?;
-            for entry in &entries {
-                engine.register_word(&entry.reading, &entry.text)?;
-            }
-            engine.user_words = entries;
+        for entry in engine.user_dictionary.entries().to_vec() {
+            engine.register_word(&entry.reading, &entry.text)?;
         }
         Ok(engine)
     }
@@ -224,31 +200,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Registers a word in the native user dictionary.
+    /// Registers a word in the native user dictionary and saves it.
     pub fn add_word(&mut self, reading: &str, text: &str) -> Result<(), ArmError> {
         self.register_word(reading, text)?;
-        let mut entries = self.user_words.clone();
-        if !entries
-            .iter()
-            .any(|entry| entry.reading == reading && entry.text == text)
-        {
-            entries.push(UserEntry {
-                reading: reading.to_owned(),
-                text: text.to_owned(),
-            });
-        }
-        let bytes = serde_json::to_vec(&entries).map_err(|e| ArmError::new(e.to_string()))?;
-        if bytes.len() > 4 * 1024 * 1024 {
-            return Err(ArmError::new("User dictionary is too large"));
-        }
-        let temporary = self.word_path.with_extension("json.tmp");
-        let mut file = std::fs::File::create(&temporary)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&temporary, &self.word_path)?;
-        self.user_words = entries;
-        Ok(())
+        self.user_dictionary.insert(reading, text)
     }
 
     fn register_word(&mut self, reading: &str, text: &str) -> Result<(), ArmError> {

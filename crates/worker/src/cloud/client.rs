@@ -1,4 +1,5 @@
 //! Text candidates from the application's cloud conversion protocol.
+use super::{CloudWord, ENABLED_FILE, enabled_in};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -13,8 +14,6 @@ use std::{
 type CloudResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
-
-pub use simeji_protocol::CloudWord;
 
 #[derive(Deserialize)]
 struct Reply {
@@ -126,12 +125,7 @@ pub struct CloudClient {
 impl CloudClient {
     pub fn open(directory: &Path) -> CloudResult<Self> {
         fs::create_dir_all(directory)?;
-        let enabled = match fs::read(directory.join("cloud-enabled.json")) {
-            Ok(bytes) if bytes.len() <= 64 => {
-                serde_json::from_slice::<bool>(&bytes).unwrap_or(false)
-            }
-            _ => false,
-        };
+        let enabled = enabled_in(directory);
         let cache = match fs::File::open(directory.join("cloud-cache.json")) {
             Ok(file) => {
                 let mut bytes = Vec::new();
@@ -158,7 +152,7 @@ impl CloudClient {
     /// Enabling authorizes transmission of readings to cloud.simeji.me.
     pub fn set_enabled(&mut self, enabled: bool) -> CloudResult<()> {
         write_atomic(
-            &self.directory.join("cloud-enabled.json"),
+            &self.directory.join(ENABLED_FILE),
             if enabled { b"true" } else { b"false" },
         )?;
         self.enabled = enabled;
