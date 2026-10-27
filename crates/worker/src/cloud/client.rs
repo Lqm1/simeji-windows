@@ -1,33 +1,43 @@
-//! Text candidates from the application's cloud conversion protocol.
-use super::{CloudWord, ENABLED_FILE, enabled_in};
+//! Candidates from Simeji's cloud conversion API, with a persistent cache.
+
+use super::{CloudWord, ENABLED_FILE, MAX_READING_CHARS, enabled_in};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::VecDeque,
     error::Error,
     fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-type CloudResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
-const MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub const ENDPOINT: &str = "https://cloud.simeji.me/py";
+const CACHE_FILE: &str = "cloud-cache.json";
+const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 800;
+const MAX_CANDIDATES: usize = 50;
+const MAX_CANDIDATE_BYTES: usize = 4096;
+const ATTEMPTS: usize = 3;
+const TIMEOUT: Duration = Duration::from_secs(3);
+type CloudResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[derive(Deserialize)]
-struct Reply {
-    data: Vec<Group>,
+struct ApiResponse {
+    data: Vec<ApiReading>,
 }
+
 #[derive(Deserialize)]
-struct Group {
+struct ApiReading {
     hira: String,
     #[serde(default)]
     cache_time: u64,
-    candidates: Vec<Word>,
+    candidates: Vec<ApiCandidate>,
 }
+
 #[derive(Deserialize)]
-struct Word {
+struct ApiCandidate {
     word: String,
     #[serde(default)]
     pron: String,
@@ -36,63 +46,64 @@ struct Word {
     #[serde(default, rename = "type")]
     kind: u32,
     #[serde(default)]
-    extra: Option<Extra>,
+    extra: Option<ApiExtra>,
 }
+
 #[derive(Default, Deserialize)]
-struct Extra {
+struct ApiExtra {
     #[serde(default)]
     scene: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct Entry {
+struct CacheEntry {
     query: String,
     stored: u64,
     ttl: u64,
     words: Vec<CloudWord>,
 }
-impl Entry {
-    fn fresh(&self, now: u64) -> bool {
+
+impl CacheEntry {
+    fn is_fresh(&self, now: u64) -> bool {
         now >= self.stored && now - self.stored < self.ttl
     }
 }
 
-fn decode(bytes: &[u8], query: &str, now: u64) -> CloudResult<Entry> {
-    if bytes.len() as u64 > MAX_BYTES {
+/// Keeps the first occurrence of each text, up to [`MAX_CANDIDATES`], and
+/// the shortest cache lifetime of the response.
+fn parse_response(bytes: &[u8], query: &str, now: u64) -> CloudResult<CacheEntry> {
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err("Cloud response exceeds limit".into());
     }
-    let reply: Reply = serde_json::from_slice(bytes)?;
+    let response: ApiResponse = serde_json::from_slice(bytes)?;
     let mut words = Vec::new();
     let mut ttl = u64::MAX;
-    for group in reply.data {
-        ttl = ttl.min(group.cache_time);
-        for word in group.candidates {
-            if word.word.is_empty()
-                || word.word.len() > 4096
-                || words.iter().any(|w: &CloudWord| w.text == word.word)
+    'readings: for reading in response.data {
+        ttl = ttl.min(reading.cache_time);
+        for candidate in reading.candidates {
+            if candidate.word.is_empty()
+                || candidate.word.len() > MAX_CANDIDATE_BYTES
+                || words.iter().any(|w: &CloudWord| w.text == candidate.word)
             {
                 continue;
             }
             words.push(CloudWord {
-                text: word.word,
-                reading: if word.pron.is_empty() {
-                    group.hira.clone()
+                text: candidate.word,
+                reading: if candidate.pron.is_empty() {
+                    reading.hira.clone()
                 } else {
-                    word.pron
+                    candidate.pron
                 },
-                property: word.prop,
-                kind: word.kind,
-                scene: word.extra.unwrap_or_default().scene,
+                property: candidate.prop,
+                kind: candidate.kind,
+                scene: candidate.extra.unwrap_or_default().scene,
             });
-            if words.len() == 50 {
-                break;
+            if words.len() == MAX_CANDIDATES {
+                break 'readings;
             }
         }
-        if words.len() == 50 {
-            break;
-        }
     }
-    Ok(Entry {
+    Ok(CacheEntry {
         query: query.into(),
         stored: now,
         ttl: if ttl == u64::MAX { 0 } else { ttl },
@@ -100,14 +111,14 @@ fn decode(bytes: &[u8], query: &str, now: u64) -> CloudResult<Entry> {
     })
 }
 
-fn now() -> u64 {
+fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
 }
+
 fn write_atomic(path: &Path, bytes: &[u8]) -> CloudResult<()> {
-    use std::io::Write;
     let temporary = path.with_extension("tmp");
     let mut file = fs::File::create(&temporary)?;
     file.write_all(bytes)?;
@@ -119,20 +130,20 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> CloudResult<()> {
 pub struct CloudClient {
     directory: PathBuf,
     enabled: bool,
-    cache: VecDeque<Entry>,
-    client: Option<Client>,
+    cache: VecDeque<CacheEntry>,
+    http: Option<Client>,
 }
+
 impl CloudClient {
     pub fn open(directory: &Path) -> CloudResult<Self> {
         fs::create_dir_all(directory)?;
-        let enabled = enabled_in(directory);
-        let cache = match fs::File::open(directory.join("cloud-cache.json")) {
+        let cache = match fs::File::open(directory.join(CACHE_FILE)) {
             Ok(file) => {
                 let mut bytes = Vec::new();
                 file.take(MAX_CACHE_BYTES as u64 + 1)
                     .read_to_end(&mut bytes)?;
                 if bytes.len() <= MAX_CACHE_BYTES {
-                    serde_json::from_slice::<VecDeque<Entry>>(&bytes).unwrap_or_default()
+                    serde_json::from_slice(&bytes).unwrap_or_default()
                 } else {
                     VecDeque::new()
                 }
@@ -141,15 +152,17 @@ impl CloudClient {
         };
         Ok(Self {
             directory: directory.into(),
-            enabled,
+            enabled: enabled_in(directory),
             cache,
-            client: None,
+            http: None,
         })
     }
-    pub fn enabled(&self) -> bool {
+
+    pub fn is_enabled(&self) -> bool {
         self.enabled
     }
-    /// Enabling authorizes transmission of readings to cloud.simeji.me.
+
+    /// Enabling authorises sending readings to [`ENDPOINT`].
     pub fn set_enabled(&mut self, enabled: bool) -> CloudResult<()> {
         write_atomic(
             &self.directory.join(ENABLED_FILE),
@@ -158,6 +171,8 @@ impl CloudClient {
         self.enabled = enabled;
         Ok(())
     }
+
+    /// Cached candidates for `query`; expired ones only with `allow_stale`.
     pub fn cached(&mut self, query: &str, allow_stale: bool) -> Vec<CloudWord> {
         if !self.enabled {
             return Vec::new();
@@ -165,8 +180,10 @@ impl CloudClient {
         let Some(index) = self.cache.iter().position(|entry| entry.query == query) else {
             return Vec::new();
         };
-        let entry = self.cache.remove(index).expect("entry position is valid");
-        let words = if allow_stale || entry.fresh(now()) {
+        let Some(entry) = self.cache.remove(index) else {
+            return Vec::new();
+        };
+        let words = if allow_stale || entry.is_fresh(unix_now()) {
             entry.words.clone()
         } else {
             Vec::new()
@@ -174,50 +191,43 @@ impl CloudClient {
         self.cache.push_back(entry);
         words
     }
+
+    /// Fresh cached candidates, else a lookup with retries, else stale ones.
     pub fn query(&mut self, query: &str) -> CloudResult<Vec<CloudWord>> {
         if !self.enabled {
             return Err(
                 "Cloud conversion is disabled; explicitly enable it before querying".into(),
             );
         }
-        if query.is_empty() || query.chars().count() > 256 {
+        if query.is_empty() || query.chars().count() > MAX_READING_CHARS {
             return Err("Invalid cloud reading length".into());
         }
         if self
             .cache
             .iter()
-            .any(|entry| entry.query == query && entry.fresh(now()))
+            .any(|entry| entry.query == query && entry.is_fresh(unix_now()))
         {
             return Ok(self.cached(query, false));
         }
-        if self.client.is_none() {
-            self.client = Some(
-                Client::builder()
+        let http = match &self.http {
+            Some(http) => http.clone(),
+            None => {
+                let http = Client::builder()
                     .https_only(true)
                     .redirect(reqwest::redirect::Policy::none())
-                    .connect_timeout(Duration::from_secs(3))
-                    .timeout(Duration::from_secs(3))
-                    .build()?,
-            );
-        }
-        let client = self.client.as_ref().expect("client initialized");
+                    .connect_timeout(TIMEOUT)
+                    .timeout(TIMEOUT)
+                    .build()?;
+                self.http = Some(http.clone());
+                http
+            }
+        };
         let mut last_error = None;
-        for _ in 0..3 {
-            match fetch(client, query).and_then(|bytes| decode(&bytes, query, now())) {
+        for _ in 0..ATTEMPTS {
+            match fetch(&http, query).and_then(|bytes| parse_response(&bytes, query, unix_now())) {
                 Ok(entry) => {
                     let words = entry.words.clone();
-                    self.cache.retain(|e| e.query != query);
-                    self.cache.push_back(entry);
-                    while self.cache.len() > 800 {
-                        self.cache.pop_front();
-                    }
-                    let mut bytes = serde_json::to_vec(&self.cache)?;
-                    while bytes.len() > MAX_CACHE_BYTES {
-                        self.cache.pop_front();
-                        bytes = serde_json::to_vec(&self.cache)?;
-                    }
-                    // Conversion still works if persistence becomes unavailable.
-                    let _ = write_atomic(&self.directory.join("cloud-cache.json"), &bytes);
+                    self.store(entry)?;
                     return Ok(words);
                 }
                 Err(error) => last_error = Some(error),
@@ -229,36 +239,60 @@ impl CloudClient {
         }
         Err(last_error.unwrap_or_else(|| "Cloud conversion failed".into()))
     }
+
+    /// Adds the entry, evicting the oldest ones beyond the cache limits. A
+    /// failure to save the cache does not fail the lookup.
+    fn store(&mut self, entry: CacheEntry) -> CloudResult<()> {
+        self.cache.retain(|cached| cached.query != entry.query);
+        self.cache.push_back(entry);
+        while self.cache.len() > MAX_CACHE_ENTRIES {
+            self.cache.pop_front();
+        }
+        let mut bytes = serde_json::to_vec(&self.cache)?;
+        while bytes.len() > MAX_CACHE_BYTES {
+            self.cache.pop_front();
+            bytes = serde_json::to_vec(&self.cache)?;
+        }
+        let _ = write_atomic(&self.directory.join(CACHE_FILE), &bytes);
+        Ok(())
+    }
 }
 
-fn fetch(client: &Client, query: &str) -> CloudResult<Vec<u8>> {
-    let response = client
-        .get("https://cloud.simeji.me/py")
-        .query(&[
-            ("web", "1"),
-            ("ol", "1"),
-            ("fmt", "JSON"),
-            ("version", "966"),
-            ("app", "simeji.windows"),
-            ("py", query),
-            ("api_version", "2"),
-            ("switch", "20"),
-            ("os_version", "14"),
-            ("section", "1"),
-            ("device", "android"),
-            ("version_name", "23.6.1"),
-            ("version_code", "966"),
-            ("system_version", "34"),
-            ("app_version", "966"),
-            ("channel", "organic"),
-            ("product", "Simeji"),
-        ])
+/// The request parameters of Simeji 23.6.1 for Android.
+fn parameters(query: &str) -> [(&'static str, &str); 17] {
+    [
+        ("web", "1"),
+        ("ol", "1"),
+        ("fmt", "JSON"),
+        ("version", "966"),
+        ("app", "simeji.windows"),
+        ("py", query),
+        ("api_version", "2"),
+        ("switch", "20"),
+        ("os_version", "14"),
+        ("section", "1"),
+        ("device", "android"),
+        ("version_name", "23.6.1"),
+        ("version_code", "966"),
+        ("system_version", "34"),
+        ("app_version", "966"),
+        ("channel", "organic"),
+        ("product", "Simeji"),
+    ]
+}
+
+fn fetch(http: &Client, query: &str) -> CloudResult<Vec<u8>> {
+    let response = http
+        .get(ENDPOINT)
+        .query(&parameters(query))
         .header("Connection", "keep-alive")
         .send()?
         .error_for_status()?;
     let mut bytes = Vec::new();
-    response.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_BYTES {
+    response
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
         return Err("Cloud response exceeds limit".into());
     }
     Ok(bytes)
@@ -267,33 +301,39 @@ fn fetch(client: &Client, query: &str) -> CloudResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn response_mapping_dedup_and_ttl_seconds() -> CloudResult<()> {
-        let entry = decode(br#"{"data":[{"hira":"neko","cache_time":3,"candidates":[{"word":"cat","type":1,"prop":4},{"word":"cat"},{"word":"kitty","pron":"kitty","extra":{"scene":"chat"}}]}]}"#, "query", 100)?;
+        let entry = parse_response(
+            br#"{"data":[{"hira":"neko","cache_time":3,"candidates":[{"word":"cat","type":1,"prop":4},{"word":"cat"},{"word":"kitty","pron":"kitty","extra":{"scene":"chat"}}]}]}"#,
+            "query",
+            100,
+        )?;
         assert_eq!(entry.words.len(), 2);
         assert_eq!(entry.words[0].reading, "neko");
         assert_eq!(entry.words[1].scene, "chat");
-        assert!(entry.fresh(102));
-        assert!(!entry.fresh(103));
-        assert!(!entry.fresh(99));
+        assert!(entry.is_fresh(102));
+        assert!(!entry.is_fresh(103));
+        assert!(!entry.is_fresh(99));
         Ok(())
     }
+
     #[test]
     fn disabled_blocks_network_and_persists_opt_in() -> CloudResult<()> {
         let directory = std::env::temp_dir().join(format!(
             "simeji-cloud-test-{}-{}",
             std::process::id(),
-            now()
+            unix_now()
         ));
         let mut cloud = CloudClient::open(&directory)?;
-        assert!(!cloud.enabled());
+        assert!(!cloud.is_enabled());
         assert!(cloud.query("synthetic").is_err());
-        assert!(cloud.client.is_none());
+        assert!(cloud.http.is_none());
         cloud.set_enabled(true)?;
         drop(cloud);
         let mut cloud = CloudClient::open(&directory)?;
-        assert!(cloud.enabled());
-        cloud.cache.push_back(decode(
+        assert!(cloud.is_enabled());
+        cloud.cache.push_back(parse_response(
             br#"{"data":[{"hira":"x","cache_time":30,"candidates":[{"word":"cached"}]}]}"#,
             "x",
             0,

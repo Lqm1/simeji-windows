@@ -4,18 +4,17 @@
 mod client;
 mod queue;
 
-pub use client::CloudClient;
+pub use client::{CloudClient, ENDPOINT};
 pub use queue::CloudQueue;
 pub use simeji_protocol::CloudWord;
 
 use std::path::Path;
 
-/// File in the user data directory that records the user's opt-in.
 const ENABLED_FILE: &str = "cloud-enabled.json";
+const MAX_READING_CHARS: usize = 256;
 
-/// Whether the user enabled cloud conversion. Read on every use so that the
-/// running worker follows `simeji-cloud enable` and `disable` immediately.
-/// Anything other than an explicit `true` keeps readings on this machine.
+/// Read on every use, so a running worker follows `simeji-cloud` at once.
+/// Anything but an explicit `true` keeps readings on this machine.
 fn enabled_in(directory: &Path) -> bool {
     std::fs::read(directory.join(ENABLED_FILE)).is_ok_and(|bytes| bytes == b"true")
 }

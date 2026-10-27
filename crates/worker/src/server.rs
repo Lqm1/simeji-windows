@@ -1,24 +1,18 @@
 //! Serves one request per pipe connection with the engine and the cloud queue.
 
 use crate::cloud::CloudQueue;
-use simeji_engine::{ArmError, Engine};
+use simeji_engine::{Engine, EngineError};
 use simeji_protocol::{Request, Response};
 use simeji_transport::Pipe;
 use std::{error::Error, path::Path, time::Duration};
 
-type BoxError = Box<dyn Error + Send + Sync>;
-
-/// Upper bound for each read and write on a client connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
-/// The client sends this after reading the reply, so the server keeps the
-/// connection open until the complete response was consumed.
-const ACKNOWLEDGEMENT: u8 = 0xa5;
 
-pub fn respond(
+pub fn dispatch(
     engine: &mut Engine,
     cloud: &CloudQueue,
     request: Request,
-) -> Result<Response, ArmError> {
+) -> Result<Response, EngineError> {
     Ok(match request {
         Request::Ping => Response::Ready,
         Request::QueueCloud { reading } => Response::CloudEnabled(cloud.queue(reading)),
@@ -42,15 +36,19 @@ pub fn respond(
     })
 }
 
-/// Runs the worker until the pipe fails. A native execution fault only
-/// fails the current request; the engine is reopened before the next one.
-pub fn serve(dictionary: &Path, user_data: &Path) -> Result<(), BoxError> {
+/// Runs until the pipe fails. A native execution fault fails only the
+/// current request; the engine is reopened before the next one.
+pub fn serve(dictionary: &Path, user_data: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     let pipe = Pipe::server()?;
     let mut engine = Engine::open(dictionary, user_data)?;
     let cloud = CloudQueue::new(user_data);
     loop {
         pipe.accept()?;
-        if let Err(error) = exchange(&pipe, &mut engine, &cloud) {
+        let answered = pipe.answer(IO_TIMEOUT, |request| {
+            dispatch(&mut engine, &cloud, request)
+                .unwrap_or_else(|error| Response::Error(error.to_string()))
+        });
+        if let Err(error) = answered {
             eprintln!("Worker connection: {error}");
         }
         pipe.disconnect()?;
@@ -58,15 +56,4 @@ pub fn serve(dictionary: &Path, user_data: &Path) -> Result<(), BoxError> {
             engine = Engine::open(dictionary, user_data)?;
         }
     }
-}
-
-fn exchange(pipe: &Pipe, engine: &mut Engine, cloud: &CloudQueue) -> Result<(), BoxError> {
-    let request = pipe.receive::<Request>(IO_TIMEOUT)?;
-    let response =
-        respond(engine, cloud, request).unwrap_or_else(|error| Response::Error(error.to_string()));
-    pipe.send(&response, IO_TIMEOUT)?;
-    if pipe.receive::<u8>(IO_TIMEOUT)? != ACKNOWLEDGEMENT {
-        return Err("Invalid worker acknowledgement".into());
-    }
-    Ok(())
 }

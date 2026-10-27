@@ -14,7 +14,4 @@ simeji-protocol.workspace = true
 unicorn-engine.workspace = true
 
 [lints.rust]
-unsafe_code = "deny"
-
-[lints.clippy]
-all = "warn"
+unsafe_code = "forbid"

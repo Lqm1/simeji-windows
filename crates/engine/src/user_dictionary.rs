@@ -1,6 +1,6 @@
 //! Persistent user dictionary entries, replayed into the native engine on open.
 
-use crate::arm::ArmError;
+use crate::EngineError;
 use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
@@ -16,23 +16,23 @@ pub(crate) struct Entry {
     pub text: String,
 }
 
-/// The saved entries. The native dictionary itself is not persisted, so the
-/// engine registers these again every time it starts.
+/// The native user dictionary is not persisted, so the engine registers
+/// these entries again every time it starts.
 pub(crate) struct UserDictionary {
     path: PathBuf,
     entries: Vec<Entry>,
 }
 
 impl UserDictionary {
-    pub fn load(learning_directory: &Path) -> Result<Self, ArmError> {
-        let path = learning_directory.join(FILE_NAME);
+    pub fn load(user_data: &Path) -> Result<Self, EngineError> {
+        let path = user_data.join(FILE_NAME);
         let entries = if path.exists() {
             if std::fs::metadata(&path)?.len() > MAX_BYTES {
-                return Err(ArmError::new("User dictionary is too large"));
+                return Err(EngineError::new("User dictionary is too large"));
             }
             let bytes = std::fs::read(&path)?;
             serde_json::from_slice(&bytes)
-                .map_err(|e| ArmError::new(format!("Invalid user dictionary: {e}")))?
+                .map_err(|e| EngineError::new(format!("Invalid user dictionary: {e}")))?
         } else {
             Vec::new()
         };
@@ -43,8 +43,7 @@ impl UserDictionary {
         &self.entries
     }
 
-    /// Adds an entry unless it already exists and atomically rewrites the file.
-    pub fn insert(&mut self, reading: &str, text: &str) -> Result<(), ArmError> {
+    pub fn insert(&mut self, reading: &str, text: &str) -> Result<(), EngineError> {
         let entry = Entry {
             reading: reading.to_owned(),
             text: text.to_owned(),
@@ -53,9 +52,9 @@ impl UserDictionary {
         if !entries.contains(&entry) {
             entries.push(entry);
         }
-        let bytes = serde_json::to_vec(&entries).map_err(|e| ArmError::new(e.to_string()))?;
+        let bytes = serde_json::to_vec(&entries).map_err(|e| EngineError::new(e.to_string()))?;
         if bytes.len() as u64 > MAX_BYTES {
-            return Err(ArmError::new("User dictionary is too large"));
+            return Err(EngineError::new("User dictionary is too large"));
         }
         let temporary = self.path.with_extension("json.tmp");
         let mut file = std::fs::File::create(&temporary)?;

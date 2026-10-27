@@ -1,11 +1,15 @@
-//! Debounced, latest-reading-only cloud work, independent of native conversion.
-use super::{CloudClient, CloudWord, enabled_in};
+//! Debounced cloud lookups for the latest reading only, off the engine thread.
+
+use super::{CloudClient, CloudWord, MAX_READING_CHARS, enabled_in};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
 };
+
+/// Typing pauses this long before the reading is looked up.
+const DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 struct State {
@@ -16,6 +20,7 @@ struct State {
     stopped: bool,
 }
 type Shared = Arc<(Mutex<State>, Condvar)>;
+
 pub struct CloudQueue {
     directory: PathBuf,
     shared: Shared,
@@ -27,7 +32,7 @@ impl CloudQueue {
         let background = shared.clone();
         let directory = directory.to_path_buf();
         let root = directory.clone();
-        let thread = thread::spawn(move || run(&root, background));
+        let thread = thread::spawn(move || run_lookups(&root, background));
         Self {
             directory,
             shared,
@@ -46,7 +51,7 @@ impl CloudQueue {
             state.pending = None;
         }
         state.enabled = enabled;
-        if !enabled || reading.is_empty() || reading.chars().count() > 256 {
+        if !enabled || reading.is_empty() || reading.chars().count() > MAX_READING_CHARS {
             state.generation = state.generation.wrapping_add(1);
             state.pending = None;
             state.result = None;
@@ -80,6 +85,7 @@ impl CloudQueue {
             .unwrap_or_default()
     }
 }
+
 impl Drop for CloudQueue {
     fn drop(&mut self) {
         {
@@ -92,7 +98,8 @@ impl Drop for CloudQueue {
         }
     }
 }
-fn run(directory: &Path, shared: Shared) {
+
+fn run_lookups(directory: &Path, shared: Shared) {
     let (lock, changed) = &*shared;
     loop {
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -104,7 +111,7 @@ fn run(directory: &Path, shared: Shared) {
         }
         let generation = state.generation;
         let (mut state, delay) = changed
-            .wait_timeout(state, Duration::from_millis(150))
+            .wait_timeout(state, DEBOUNCE)
             .unwrap_or_else(|e| e.into_inner());
         if state.stopped {
             return;
@@ -164,7 +171,6 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("simeji-cloud-queue-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        // No background thread or networking is needed to exercise stale guards.
         let queue = CloudQueue {
             directory: directory.clone(),
             shared: Shared::default(),

@@ -1,14 +1,14 @@
 use simeji_engine::Engine;
 use simeji_protocol::{Request, Response};
-use simeji_worker::{cloud::CloudQueue, server::respond};
+use simeji_worker::{cloud::CloudQueue, server::dispatch};
 
 #[test]
 fn answers_each_request_with_the_engine_and_cloud_queue() {
-    let data = std::env::temp_dir().join(format!("simeji-respond-test-{}", std::process::id()));
+    let data = std::env::temp_dir().join(format!("simeji-dispatch-test-{}", std::process::id()));
     let dictionary = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dict");
     let mut engine = Engine::open(&dictionary, &data).unwrap();
     let cloud = CloudQueue::new(&data);
-    let mut ask = |request| respond(&mut engine, &cloud, request).unwrap();
+    let mut ask = |request| dispatch(&mut engine, &cloud, request).unwrap();
 
     assert!(matches!(ask(Request::Ping), Response::Ready));
     assert!(matches!(
@@ -35,7 +35,7 @@ fn answers_each_request_with_the_engine_and_cloud_queue() {
         Response::CloudCandidates(words) if words.is_empty()
     ));
     assert!(
-        respond(
+        dispatch(
             &mut engine,
             &cloud,
             Request::Convert {

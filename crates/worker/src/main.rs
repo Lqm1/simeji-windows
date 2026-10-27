@@ -2,14 +2,14 @@ use simeji_protocol::{Request, Response};
 use simeji_transport::exchange;
 use std::{error::Error, path::PathBuf, time::Duration};
 
-const USAGE: &str = "Usage: simeji-worker serve <dict> <learn> | ping | convert <reading> | add-word <reading> <word>";
+const USAGE: &str = "Usage: simeji-worker serve <dictionary-directory> <user-data-directory> | ping | convert <reading> | add-word <reading> <word>";
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("serve") => {
             let dictionary = PathBuf::from(args.next().ok_or("Missing dictionary directory")?);
-            let user_data = PathBuf::from(args.next().ok_or("Missing learning directory")?);
+            let user_data = PathBuf::from(args.next().ok_or("Missing user data directory")?);
             simeji_worker::server::serve(&dictionary, &user_data)?;
         }
         Some("ping") => println!(

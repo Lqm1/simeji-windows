@@ -1,4 +1,5 @@
-//! Local, owner-only named pipes. Overlapped IO keeps client waits bounded.
+//! Local, owner-only named pipes carrying one request and one response per
+//! connection. Overlapped IO bounds every wait.
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fs::File,
@@ -18,10 +19,17 @@ use windows::{
 };
 
 pub const MAX_FRAME: usize = 1024 * 1024;
+const DEFAULT_CHANNEL: &str = "engine-v1";
+const MAX_CHANNEL_LENGTH: usize = 64;
+/// Sent by the client after it read the response, so the server keeps the
+/// connection open until the whole response was consumed.
+const ACKNOWLEDGEMENT: u8 = 0xa5;
+const SECURITY_DESCRIPTOR: PCWSTR = w!("D:P(A;;GA;;;OW)");
+const BUSY_RETRY: Duration = Duration::from_millis(1);
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-fn name(channel: &str) -> Result<Vec<u16>> {
-    if channel.len() > 64
+fn pipe_name(channel: &str) -> Result<Vec<u16>> {
+    if channel.len() > MAX_CHANNEL_LENGTH
         || !channel
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
@@ -38,8 +46,8 @@ fn name(channel: &str) -> Result<Vec<u16>> {
     .collect())
 }
 
-struct Event(HANDLE);
-impl Drop for Event {
+struct OwnedEvent(HANDLE);
+impl Drop for OwnedEvent {
     fn drop(&mut self) {
         unsafe {
             let _ = CloseHandle(self.0);
@@ -52,14 +60,14 @@ pub struct Pipe {
 }
 impl Pipe {
     pub fn server() -> Result<Self> {
-        Self::server_channel("engine-v1")
+        Self::server_channel(DEFAULT_CHANNEL)
     }
     pub fn server_channel(channel: &str) -> Result<Self> {
-        let name = name(channel)?;
+        let name = pipe_name(channel)?;
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                w!("D:P(A;;GA;;;OW)"),
+                SECURITY_DESCRIPTOR,
                 SDDL_REVISION_1,
                 &mut descriptor,
                 None,
@@ -88,17 +96,16 @@ impl Pipe {
             if let Some(error) = error {
                 return Err(error.into());
             }
-            // The newly created handle is transferred exactly once to File.
             Ok(Self {
                 file: File::from_raw_handle(handle.0),
             })
         }
     }
     pub fn connect(timeout: Duration) -> Result<Self> {
-        Self::connect_channel("engine-v1", timeout)
+        Self::connect_channel(DEFAULT_CHANNEL, timeout)
     }
     pub fn connect_channel(channel: &str, timeout: Duration) -> Result<Self> {
-        let name = name(channel)?;
+        let name = pipe_name(channel)?;
         let end = Instant::now() + timeout;
         loop {
             unsafe {
@@ -123,19 +130,19 @@ impl Pipe {
                     }
                 }
             }
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(BUSY_RETRY);
         }
     }
     fn handle(&self) -> HANDLE {
         HANDLE(self.file.as_raw_handle())
     }
-    fn operation(
+    fn overlapped(
         &self,
         deadline: Option<Instant>,
         start: impl FnOnce(*mut OVERLAPPED) -> windows::core::Result<()>,
     ) -> Result<u32> {
         unsafe {
-            let event = Event(CreateEventW(None, true, false, None)?);
+            let event = OwnedEvent(CreateEventW(None, true, false, None)?);
             let mut overlapped = OVERLAPPED {
                 hEvent: event.0,
                 ..Default::default()
@@ -158,7 +165,7 @@ impl Pipe {
                 // Drain cancellation before dropping the OVERLAPPED and buffer.
                 let _ = GetOverlappedResult(self.handle(), &overlapped, &mut transferred, true);
                 return Err(
-                    io::Error::new(io::ErrorKind::TimedOut, "Conversion worker timed out").into(),
+                    io::Error::new(io::ErrorKind::TimedOut, "Pipe operation timed out").into(),
                 );
             }
             GetOverlappedResult(self.handle(), &overlapped, &mut transferred, false)?;
@@ -166,7 +173,7 @@ impl Pipe {
         }
     }
     pub fn accept(&self) -> Result<()> {
-        self.operation(None, |overlapped| unsafe {
+        self.overlapped(None, |overlapped| unsafe {
             ConnectNamedPipe(self.handle(), Some(overlapped))
         })
         .map(|_| ())
@@ -180,7 +187,7 @@ impl Pipe {
     fn read_exact(&self, buffer: &mut [u8], deadline: Instant) -> Result<()> {
         let mut offset = 0;
         while offset < buffer.len() {
-            let n = self.operation(Some(deadline), |overlapped| unsafe {
+            let n = self.overlapped(Some(deadline), |overlapped| unsafe {
                 ReadFile(
                     self.handle(),
                     Some(&mut buffer[offset..]),
@@ -198,7 +205,7 @@ impl Pipe {
     fn write_all(&self, buffer: &[u8], deadline: Instant) -> Result<()> {
         let mut offset = 0;
         while offset < buffer.len() {
-            let n = self.operation(Some(deadline), |overlapped| unsafe {
+            let n = self.overlapped(Some(deadline), |overlapped| unsafe {
                 WriteFile(
                     self.handle(),
                     Some(&buffer[offset..]),
@@ -220,18 +227,34 @@ impl Pipe {
         let length = u32::from_le_bytes(header) as usize;
         if length > MAX_FRAME {
             return Err(
-                io::Error::new(io::ErrorKind::InvalidData, "Worker frame is too large").into(),
+                io::Error::new(io::ErrorKind::InvalidData, "Pipe frame is too large").into(),
             );
         }
         let mut bytes = vec![0; length];
         self.read_exact(&mut bytes, deadline)?;
         Ok(serde_json::from_slice(&bytes)?)
     }
+    /// Serves one connection: receives a request, sends `respond(request)`
+    /// and waits for the client to acknowledge it.
+    pub fn answer<Q: DeserializeOwned, R: Serialize>(
+        &self,
+        timeout: Duration,
+        respond: impl FnOnce(Q) -> R,
+    ) -> Result<()> {
+        let request = self.receive::<Q>(timeout)?;
+        self.send(&respond(request), timeout)?;
+        if self.receive::<u8>(timeout)? != ACKNOWLEDGEMENT {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "Invalid acknowledgement").into(),
+            );
+        }
+        Ok(())
+    }
     pub fn send<T: Serialize>(&self, value: &T, timeout: Duration) -> Result<()> {
         let bytes = serde_json::to_vec(value)?;
         if bytes.len() > MAX_FRAME {
             return Err(
-                io::Error::new(io::ErrorKind::InvalidData, "Worker frame is too large").into(),
+                io::Error::new(io::ErrorKind::InvalidData, "Pipe frame is too large").into(),
             );
         }
         let deadline = Instant::now() + timeout;
@@ -241,7 +264,7 @@ impl Pipe {
 }
 
 pub fn exchange<Q: Serialize, R: DeserializeOwned>(request: &Q, timeout: Duration) -> Result<R> {
-    exchange_channel("engine-v1", request, timeout)
+    exchange_channel(DEFAULT_CHANNEL, request, timeout)
 }
 pub fn exchange_channel<Q: Serialize, R: DeserializeOwned>(
     channel: &str,
@@ -251,8 +274,7 @@ pub fn exchange_channel<Q: Serialize, R: DeserializeOwned>(
     let pipe = Pipe::connect_channel(channel, timeout)?;
     pipe.send(request, timeout)?;
     let response = pipe.receive(timeout)?;
-    // Keep the server connected until the complete reply was consumed.
-    pipe.send(&0xa5u8, timeout)?;
+    pipe.send(&ACKNOWLEDGEMENT, timeout)?;
     Ok(response)
 }
 
@@ -266,14 +288,12 @@ mod tests {
         let thread = std::thread::spawn(move || {
             for _ in 0..2 {
                 server.accept().unwrap();
-                assert_eq!(
-                    server.receive::<String>(Duration::from_secs(1)).unwrap(),
-                    "にほんご"
-                );
                 server
-                    .send(&"日本語".repeat(10_000), Duration::from_secs(1))
+                    .answer(Duration::from_secs(1), |request: String| {
+                        assert_eq!(request, "にほんご");
+                        "日本語".repeat(10_000)
+                    })
                     .unwrap();
-                assert_eq!(server.receive::<u8>(Duration::from_secs(1)).unwrap(), 0xa5);
                 server.disconnect().unwrap();
             }
             server.accept().unwrap();
