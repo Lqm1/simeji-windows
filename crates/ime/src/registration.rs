@@ -1,4 +1,7 @@
-use crate::{MODULE, PROFILE, SERVICE};
+//! TSF profile and COM class registration for the current user, used by
+//! `simeji-setup` and the `DllRegisterServer` entry points.
+
+use crate::{CLSID_TEXT_SERVICE, DISPLAY_NAME, GUID_PROFILE, LANGID_JAPANESE, server};
 use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
@@ -8,6 +11,12 @@ use windows::{
     },
     core::*,
 };
+
+/// TSF categories: a keyboard text service that provides display attributes.
+const CATEGORIES: [&GUID; 2] = [
+    &GUID_TFCAT_TIP_KEYBOARD,
+    &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+];
 
 /// Loads the packaged DLL and checks its COM exports without registering it.
 pub fn verify(path: &Path) -> Result<()> {
@@ -31,7 +40,7 @@ pub fn verify(path: &Path) -> Result<()> {
                 GetProcAddress(module, s!("DllCanUnloadNow")).ok_or_else(Error::from_thread)?,
             );
             let mut output = std::ptr::null_mut();
-            get_class(&SERVICE, &IClassFactory::IID, &mut output).ok()?;
+            get_class(&CLSID_TEXT_SERVICE, &IClassFactory::IID, &mut output).ok()?;
             let factory = IClassFactory::from_raw(output);
             let service: ITfTextInputProcessor = factory.CreateInstance(None)?;
             let _: ITfKeyEventSink = service.cast()?;
@@ -48,23 +57,18 @@ pub fn verify(path: &Path) -> Result<()> {
         result
     }
 }
+/// The path of this DLL as loaded into the current process.
 pub fn module_path() -> Result<PathBuf> {
     let mut path = vec![0u16; 32768];
-    let length = unsafe {
-        GetModuleFileNameW(
-            Some(HMODULE(
-                MODULE.load(std::sync::atomic::Ordering::SeqCst) as *mut _
-            )),
-            &mut path,
-        )
-    } as usize;
+    let length = unsafe { GetModuleFileNameW(Some(server::module()), &mut path) } as usize;
     if length == 0 || length >= path.len() {
         return Err(Error::from_thread());
     }
     Ok(PathBuf::from(String::from_utf16_lossy(&path[..length])))
 }
+/// The COM class key under `HKEY_CURRENT_USER`.
 fn key_path() -> String {
-    format!("Software\\Classes\\CLSID\\{{{SERVICE:?}}}")
+    format!("Software\\Classes\\CLSID\\{{{CLSID_TEXT_SERVICE:?}}}")
 }
 fn set_string(path: &str, name: PCWSTR, value: &str) -> Result<()> {
     let path = HSTRING::from(path);
@@ -92,6 +96,7 @@ fn set_string(path: &str, name: PCWSTR, value: &str) -> Result<()> {
         result
     }
 }
+/// Registers the DLL at `path` as the Japanese keyboard profile and enables it.
 pub fn register(path: &Path) -> Result<()> {
     if !path.is_absolute() || !path.is_file() {
         return Err(Error::new(
@@ -108,10 +113,10 @@ pub fn register(path: &Path) -> Result<()> {
         // A privilege failure must not leave an orphaned COM registration.
         profiles
             .RegisterProfile(
-                &SERVICE,
-                0x0411,
-                &PROFILE,
-                &"Simeji Windows".encode_utf16().collect::<Vec<_>>(),
+                &CLSID_TEXT_SERVICE,
+                LANGID_JAPANESE,
+                &GUID_PROFILE,
+                &DISPLAY_NAME.encode_utf16().collect::<Vec<_>>(),
                 &path.to_string_lossy().encode_utf16().collect::<Vec<_>>(),
                 0,
                 Default::default(),
@@ -127,14 +132,20 @@ pub fn register(path: &Path) -> Result<()> {
             })?;
         let categories: ITfCategoryMgr =
             CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
-        categories.RegisterCategory(&SERVICE, &GUID_TFCAT_TIP_KEYBOARD, &SERVICE)?;
-        categories.RegisterCategory(&SERVICE, &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, &SERVICE)?;
-        set_string(&key_path(), PCWSTR::null(), "Simeji Windows")?;
-        let server = format!("{}\\InprocServer32", key_path());
-        set_string(&server, PCWSTR::null(), &path.to_string_lossy())?;
-        set_string(&server, w!("ThreadingModel"), "Apartment")?;
+        for category in CATEGORIES {
+            categories.RegisterCategory(&CLSID_TEXT_SERVICE, category, &CLSID_TEXT_SERVICE)?;
+        }
+        set_string(&key_path(), PCWSTR::null(), DISPLAY_NAME)?;
+        let inproc = format!("{}\\InprocServer32", key_path());
+        set_string(&inproc, PCWSTR::null(), &path.to_string_lossy())?;
+        set_string(&inproc, w!("ThreadingModel"), "Apartment")?;
         let user_profiles: ITfInputProcessorProfiles = profiles.cast()?;
-        user_profiles.EnableLanguageProfile(&SERVICE, 0x0411, &PROFILE, true)?;
+        user_profiles.EnableLanguageProfile(
+            &CLSID_TEXT_SERVICE,
+            LANGID_JAPANESE,
+            &GUID_PROFILE,
+            true,
+        )?;
         Ok(())
     })();
     unsafe {
@@ -142,6 +153,7 @@ pub fn register(path: &Path) -> Result<()> {
     }
     result
 }
+/// Removes the profile, categories and COM class that [`register`] created.
 pub fn unregister() -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
@@ -150,15 +162,16 @@ pub fn unregister() -> Result<()> {
         let profiles: ITfInputProcessorProfiles =
             CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
         let present = profiles
-            .GetLanguageProfileDescription(&SERVICE, 0x0411, &PROFILE)
+            .GetLanguageProfileDescription(&CLSID_TEXT_SERVICE, LANGID_JAPANESE, &GUID_PROFILE)
             .is_ok();
         let categories: ITfCategoryMgr =
             CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
-        let _ = categories.UnregisterCategory(&SERVICE, &GUID_TFCAT_TIP_KEYBOARD, &SERVICE);
-        let _ =
-            categories.UnregisterCategory(&SERVICE, &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, &SERVICE);
+        for category in CATEGORIES {
+            let _ =
+                categories.UnregisterCategory(&CLSID_TEXT_SERVICE, category, &CLSID_TEXT_SERVICE);
+        }
         let profile_result = if present {
-            profiles.Unregister(&SERVICE)
+            profiles.Unregister(&CLSID_TEXT_SERVICE)
         } else {
             Ok(())
         };
