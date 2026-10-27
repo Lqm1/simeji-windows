@@ -51,6 +51,7 @@ pub struct LibrarySet {
     pub machine: ArmMachine,
     pub imports: Vec<Import>,
     pub initializers: Vec<u32>,
+    pub(crate) unwind: Vec<(u32, u32, u32)>,
     symbols: BTreeMap<String, u32>,
 }
 
@@ -212,9 +213,17 @@ impl LibrarySet {
             }
         }
         let mut initializers = Vec::new();
+        let mut unwind = Vec::new();
         for (_, bytes, base) in LIBRARIES {
             let elf = parse(bytes)?;
             for section in &elf.section_headers {
+                if elf.shdr_strtab.get_at(section.sh_name) == Some(".ARM.exidx") {
+                    unwind.push((
+                        base,
+                        base + section.sh_addr as u32,
+                        section.sh_size as u32 / 8,
+                    ));
+                }
                 if elf.shdr_strtab.get_at(section.sh_name) != Some(".init_array") {
                     continue;
                 }
@@ -238,6 +247,7 @@ impl LibrarySet {
             machine,
             imports,
             initializers,
+            unwind,
             symbols,
         })
     }

@@ -30,6 +30,18 @@ impl fmt::Display for ArmError {
 
 impl Error for ArmError {}
 
+impl From<unicorn_engine::uc_error> for ArmError {
+    fn from(error: unicorn_engine::uc_error) -> Self {
+        Self::new(format!("ARM execution: {error:?}"))
+    }
+}
+
+impl From<std::io::Error> for ArmError {
+    fn from(error: std::io::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
 fn checked<T>(result: Result<T, unicorn_engine::uc_error>) -> Result<T, ArmError> {
     result.map_err(|error| ArmError::new(format!("ARM execution: {error:?}")))
 }
@@ -72,6 +84,16 @@ impl ArmMachine {
 
     /// Calls an AAPCS32 function. A set low bit selects Thumb instructions.
     pub fn call(&mut self, address: u32, arguments: &[u32]) -> Result<u32, ArmError> {
+        self.call_with_limits(address, arguments, TIMEOUT_US, INSTRUCTION_LIMIT)
+    }
+
+    pub(crate) fn call_with_limits(
+        &mut self,
+        address: u32,
+        arguments: &[u32],
+        timeout_us: u64,
+        instructions: usize,
+    ) -> Result<u32, ArmError> {
         if arguments.len() > 32 {
             return Err(ArmError::new("Too many ARM call arguments"));
         }
@@ -95,12 +117,10 @@ impl ArmMachine {
         for (index, argument) in arguments.iter().skip(4).enumerate() {
             self.write(stack_top + (index * 4) as u64, &argument.to_le_bytes())?;
         }
-        checked(self.emulator.emu_start(
-            u64::from(address),
-            RETURN,
-            TIMEOUT_US,
-            INSTRUCTION_LIMIT,
-        ))?;
+        checked(
+            self.emulator
+                .emu_start(u64::from(address), RETURN, timeout_us, instructions),
+        )?;
         let pc = checked(self.emulator.reg_read(RegisterARM::PC))?;
         if pc != RETURN {
             return Err(ArmError::new(format!(
