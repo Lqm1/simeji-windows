@@ -60,11 +60,11 @@ impl Worker {
 
     /// Records the candidate the user committed. Learning is best effort and
     /// never fails the commit.
-    pub fn learn(&self, candidate: Candidate) {
+    pub fn learn(&self, candidate: Candidate, previous: Option<Candidate>) {
         let _ = Self::request(
             &Request::Learn {
                 candidate,
-                previous: None,
+                previous,
             },
             REQUEST_TIMEOUT,
         );
