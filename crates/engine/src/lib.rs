@@ -11,6 +11,7 @@ mod engine;
 mod error;
 mod host;
 mod user_dictionary;
+mod watchdog;
 
 pub use engine::{Engine, EnginePaths};
 pub use error::EngineError;
