@@ -11,8 +11,6 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/simeji-target
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -22,6 +20,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $clangPath = python -c "import clang, pathlib; print(pathlib.Path(clang.__file__).parent / 'native')"
           "LIBCLANG_PATH=$clangPath" >> $env:GITHUB_ENV
+          "CARGO_TARGET_DIR=$env:RUNNER_TEMP/simeji-target" >> $env:GITHUB_ENV
           rustup show
       - name: Check formatting
         run: cargo fmt --check
