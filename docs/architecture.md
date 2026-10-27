@@ -39,10 +39,10 @@ TSFに依存しない層:
 
 TSF・COMとの接続層:
 
-- `server`: DLLエントリポイント、クラスファクトリ、アンロード判定。
+- `dll`: DLLエントリポイント、クラスファクトリ、アンロード判定。
 - `text_service`: `ITfTextInputProcessor`、`ITfKeyEventSink` などの実装。キーを `composer` に渡し、返された操作を編集セッションで文書へ適用する。確定時の学習とクラウド照会は、入力スコープが許す場合だけ行う。
 - `edit_session`: 未確定文字の書き込み、表示属性、キャレット、候補ウィンドウの位置。
-- `display`、`candidate_window`、`input_scope`、`cloud_timer`、`registration`: 表示属性、候補ウィンドウ、入力スコープの判定、クラウド結果の取得、登録。
+- `display_attributes`、`candidate_window`、`input_scope`、`cloud_timer`、`registration`: 表示属性、候補ウィンドウ、入力スコープの判定、クラウド結果の取得、登録。
 
 入力の状態をTSFに依存しない層に集めるのは、入力の応答、Backspace、候補操作を変更するときに、TSFや実機なしで挙動を単体テストできるようにするため。`composer` の状態はTSFやワーカーの呼び出し中に借用しないため、操作の適用中にTSFから再入（合成の終了通知など）されても競合しない。ワーカーの失敗でキー処理が途中で止まっても、それまでに返された操作（直前の確定など）は文書へ適用する。
 
@@ -52,7 +52,7 @@ TSF・COMとの接続層:
 
 `simeji-worker` が変換エンジンを保持する。`server` が要求をエンジンとクラウドに振り分け、ネイティブ実行が失敗した場合は次の要求の前にエンジンを開き直す。`simeji-launcher` はワーカーを起動し、`simeji-cloud` はクラウド設定を変更する。
 
-`crates/engine` の `Engine` は変換・学習・辞書登録、`user_dictionary` はユーザー辞書の保存、`arm` はARM実行、`elf` はライブラリのロード、`host` は必要なAndroid実行環境との接続を担当する。
+`crates/engine` の `Engine` は変換・学習・辞書登録、`user_dictionary` はユーザー辞書の保存、`arm` はARM実行、`elf` はライブラリのロードとリンク、`host` はライブラリが呼び出すAndroidのlibc関数（ヒープ、文字列、ファイル、書式、スレッド・時刻）の実装を担当する。
 
 元のエンジンと辞書を使うのは、独自変換による近似を避けるため。ARMライブラリをUnicornで実行することで、Windows x64から利用する。TSF DLLとワーカーを分け、エンジンの実行状態を入力先アプリのプロセスから分離する。ただし、同期要求を待つ間の入力遅延まで防ぐ構成ではない。
 
