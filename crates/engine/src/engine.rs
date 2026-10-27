@@ -85,6 +85,17 @@ const MAX_USER_WORD_BYTES: usize = 1024;
 const MAX_TRANSLITERATION_BYTES: u32 = 16384;
 const MAX_LIST_ENTRIES: u32 = 4096;
 
+/// Where an engine reads its dictionaries and keeps the user's data.
+#[derive(Clone, Copy, Debug)]
+pub struct EnginePaths<'a> {
+    /// The bundled dictionaries, opened read-only.
+    pub dictionary: &'a Path,
+    /// The engine's own learning files.
+    pub learning: &'a Path,
+    /// The user dictionary entries, as JSON.
+    pub user_dictionary: &'a Path,
+}
+
 /// One engine session. Not thread-safe: use it from a single worker thread.
 pub struct Engine {
     native: LibrarySet,
@@ -94,21 +105,21 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn open(dictionary: &Path, user_data: &Path) -> Result<Self, EngineError> {
+    pub fn open(paths: EnginePaths<'_>) -> Result<Self, EngineError> {
         let mut native = LibrarySet::bundled()?;
         native
             .machine
             .map(HEAP_START.into(), (HEAP_END - HEAP_START).into())?;
         let host = Rc::new(RefCell::new(Host::new(
-            dictionary,
-            user_data,
+            paths.dictionary,
+            paths.learning,
             native.unwind_tables.clone(),
         )?));
         trap_imports(&mut native, &host)?;
         let mut engine = Self {
             native,
             host,
-            user_dictionary: UserDictionary::load(user_data)?,
+            user_dictionary: UserDictionary::load(paths.user_dictionary)?,
             faulted: false,
         };
         engine.initialize()?;

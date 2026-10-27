@@ -7,7 +7,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const FILE_NAME: &str = "user-dictionary.json";
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -24,8 +23,8 @@ pub(crate) struct UserDictionary {
 }
 
 impl UserDictionary {
-    pub fn load(user_data: &Path) -> Result<Self, EngineError> {
-        let path = user_data.join(FILE_NAME);
+    pub fn load(path: &Path) -> Result<Self, EngineError> {
+        let path = path.to_path_buf();
         let entries = if path.exists() {
             if std::fs::metadata(&path)?.len() > MAX_BYTES {
                 return Err(EngineError::new("User dictionary is too large"));
@@ -56,7 +55,10 @@ impl UserDictionary {
         if bytes.len() as u64 > MAX_BYTES {
             return Err(EngineError::new("User dictionary is too large"));
         }
-        let temporary = self.path.with_extension("json.tmp");
+        if let Some(directory) = self.path.parent() {
+            std::fs::create_dir_all(directory)?;
+        }
+        let temporary = self.path.with_extension("tmp");
         let mut file = std::fs::File::create(&temporary)?;
         file.write_all(&bytes)?;
         file.sync_all()?;

@@ -1,6 +1,6 @@
 //! Requests to the conversion worker process.
 
-use simeji_protocol::{Candidate, CloudWord, Conversion, Request, Response};
+use simeji_protocol::{Candidate, CloudCandidate, Conversion, Request, Response, WORKER_PIPE};
 use std::{fmt, time::Duration};
 use windows::Win32::Foundation::{E_FAIL, E_UNEXPECTED};
 
@@ -40,9 +40,13 @@ pub(crate) trait Converter {
     /// Romaji to the hiragana reading.
     fn transliterate(&mut self, romaji: &str) -> Result<String, WorkerError>;
     /// The best sentence for a reading, split into clauses.
-    fn convert(&mut self, reading: &str) -> Result<Conversion, WorkerError>;
+    fn convert_sentence(&mut self, reading: &str) -> Result<Conversion, WorkerError>;
     /// Alternatives for one clause, given the text of the clauses before it.
-    fn candidates(&mut self, reading: &str, context: &str) -> Result<Vec<Candidate>, WorkerError>;
+    fn clause_candidates(
+        &mut self,
+        reading: &str,
+        context: &str,
+    ) -> Result<Vec<Candidate>, WorkerError>;
 }
 
 /// The worker reached over its local pipe; every request uses a new connection.
@@ -50,7 +54,7 @@ pub(crate) struct Worker;
 
 impl Worker {
     fn request(request: &Request, timeout: Duration) -> Result<Response, WorkerError> {
-        simeji_transport::exchange(request, timeout)
+        simeji_transport::call(WORKER_PIPE, request, timeout)
             .map_err(|error| WorkerError::Failed(error.to_string()))
     }
 
@@ -76,9 +80,9 @@ impl Worker {
     }
 
     /// The finished cloud result for `reading`. Never performs HTTP itself.
-    pub fn poll_cloud(&self, reading: String) -> Option<Vec<CloudWord>> {
+    pub fn poll_cloud(&self, reading: String) -> Option<Vec<CloudCandidate>> {
         match Self::request(&Request::PollCloud { reading }, POLL_TIMEOUT) {
-            Ok(Response::CloudCandidates(words)) => Some(words),
+            Ok(Response::CloudCandidates(candidates)) => Some(candidates),
             _ => None,
         }
     }
@@ -97,13 +101,13 @@ impl Converter for Worker {
             romaji: romaji.to_owned(),
         };
         match Self::request(&request, REQUEST_TIMEOUT)? {
-            Response::Text(text) => Ok(text),
+            Response::Reading(reading) => Ok(reading),
             response => Err(unexpected_response(response)),
         }
     }
 
-    fn convert(&mut self, reading: &str) -> Result<Conversion, WorkerError> {
-        let request = Request::Convert {
+    fn convert_sentence(&mut self, reading: &str) -> Result<Conversion, WorkerError> {
+        let request = Request::ConvertSentence {
             reading: reading.to_owned(),
         };
         match Self::request(&request, REQUEST_TIMEOUT)? {
@@ -112,8 +116,12 @@ impl Converter for Worker {
         }
     }
 
-    fn candidates(&mut self, reading: &str, context: &str) -> Result<Vec<Candidate>, WorkerError> {
-        let request = Request::Candidates {
+    fn clause_candidates(
+        &mut self,
+        reading: &str,
+        context: &str,
+    ) -> Result<Vec<Candidate>, WorkerError> {
+        let request = Request::ClauseCandidates {
             reading: reading.to_owned(),
             context: context.to_owned(),
         };

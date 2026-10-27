@@ -1,6 +1,6 @@
 //! The candidate list for the focused clause, merged with cloud sentences.
 
-use simeji_protocol::{Candidate, CloudWord};
+use simeji_protocol::{Candidate, CloudCandidate};
 
 /// Candidates per page of the candidate window, numbered 1–7.
 pub(crate) const PAGE_SIZE: usize = 7;
@@ -34,7 +34,12 @@ impl CandidateList {
     /// Builds the list from the engine's candidates for a clause and the
     /// cloud sentences for the whole `reading`, selecting the clause's
     /// `current` text.
-    pub fn new(engine: Vec<Candidate>, cloud: &[CloudWord], reading: &str, current: &str) -> Self {
+    pub fn new(
+        engine: Vec<Candidate>,
+        cloud: &[CloudCandidate],
+        reading: &str,
+        current: &str,
+    ) -> Self {
         let mut choices = engine
             .into_iter()
             .map(|candidate| Choice {
@@ -141,8 +146,8 @@ mod tests {
         }
     }
 
-    fn cloud(text: &str, scene: &str) -> CloudWord {
-        CloudWord {
+    fn cloud(text: &str, scene: &str) -> CloudCandidate {
+        CloudCandidate {
             text: text.into(),
             reading: "sentence".into(),
             property: 7,
@@ -161,8 +166,9 @@ mod tests {
     #[test]
     fn places_cloud_sentences_after_the_first_engine_candidate() {
         let engine = ["a", "b", "c"].map(candidate).to_vec();
-        let words = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"].map(|t| cloud(t, ""));
-        let list = CandidateList::new(engine, &words, "reading", "b");
+        let cloud_candidates =
+            ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8"].map(|t| cloud(t, ""));
+        let list = CandidateList::new(engine, &cloud_candidates, "reading", "b");
         assert_eq!(
             texts(&list),
             [
@@ -192,15 +198,15 @@ mod tests {
     }
 
     #[test]
-    fn skips_duplicate_and_scene_specific_cloud_words() {
+    fn skips_duplicate_and_scene_specific_cloud_candidates() {
         let engine = ["a", "b"].map(candidate).to_vec();
-        let words = [
+        let cloud_candidates = [
             cloud("a", ""),
             cloud("x", "chat"),
             cloud("y", ""),
             cloud("y", ""),
         ];
-        let list = CandidateList::new(engine, &words, "reading", "missing");
+        let list = CandidateList::new(engine, &cloud_candidates, "reading", "missing");
         assert_eq!(texts(&list), [("a", false), ("y", true), ("b", false)]);
         // Without a matching clause text the first candidate is selected.
         assert_eq!(list.selected, 0);

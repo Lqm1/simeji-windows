@@ -1,10 +1,34 @@
-use simeji_engine::Engine;
+use simeji_engine::{Engine, EnginePaths};
+use std::path::{Path, PathBuf};
+
+struct TestData(PathBuf);
+
+impl TestData {
+    fn new() -> Self {
+        Self(std::env::temp_dir().join(format!("simeji-conversion-test-{}", std::process::id())))
+    }
+
+    fn open(&self) -> Engine {
+        let dictionary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dictionary");
+        Engine::open(EnginePaths {
+            dictionary: &dictionary,
+            learning: &self.0.join("Learning"),
+            user_dictionary: &self.0.join("user-dictionary.json"),
+        })
+        .unwrap()
+    }
+}
+
+impl Drop for TestData {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 #[test]
 fn converts_readings_with_the_bundled_dictionary() {
-    let learn = std::env::temp_dir().join(format!("simeji-conversion-test-{}", std::process::id()));
-    let dict = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dict");
-    let mut engine = Engine::open(&dict, &learn).unwrap();
+    let data = TestData::new();
+    let mut engine = data.open();
     assert_eq!(engine.transliterate("nihongo").unwrap(), "にほんご");
     for (reading, expected) in [
         ("にほんご", "日本語"),
@@ -62,7 +86,7 @@ fn converts_readings_with_the_bundled_dictionary() {
             .any(|c| c.text == "私用検証語")
     );
     drop(engine);
-    let mut reopened = Engine::open(&dict, &learn).unwrap();
+    let mut reopened = data.open();
     assert!(
         reopened
             .clause_candidates("こーでっくす", "")
@@ -74,6 +98,4 @@ fn converts_readings_with_the_bundled_dictionary() {
         reopened.clause_candidates("ねこ", "").unwrap()[0].text,
         "根子"
     );
-    drop(reopened);
-    std::fs::remove_dir_all(learn).unwrap();
 }

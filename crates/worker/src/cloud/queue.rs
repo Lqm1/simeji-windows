@@ -1,8 +1,9 @@
 //! Debounced cloud lookups for the latest reading only, off the engine thread.
 
-use super::{CloudClient, CloudWord, MAX_READING_CHARS, enabled_in};
+use super::{CloudClient, MAX_READING_CHARS};
+use crate::user_data::UserData;
+use simeji_protocol::CloudCandidate;
 use std::{
-    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
@@ -15,26 +16,25 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 struct State {
     generation: u64,
     pending: Option<String>,
-    result: Option<(String, Vec<CloudWord>)>,
+    result: Option<(String, Vec<CloudCandidate>)>,
     enabled: bool,
     stopped: bool,
 }
 type Shared = Arc<(Mutex<State>, Condvar)>;
 
 pub struct CloudQueue {
-    directory: PathBuf,
+    user_data: UserData,
     shared: Shared,
     thread: Option<JoinHandle<()>>,
 }
 impl CloudQueue {
-    pub fn new(directory: &Path) -> Self {
+    pub fn new(user_data: &UserData) -> Self {
         let shared = Shared::default();
         let background = shared.clone();
-        let directory = directory.to_path_buf();
-        let root = directory.clone();
-        let thread = thread::spawn(move || run_lookups(&root, background));
+        let lookups = user_data.clone();
+        let thread = thread::spawn(move || run_lookups(&lookups, background));
         Self {
-            directory,
+            user_data: user_data.clone(),
             shared,
             thread: Some(thread),
         }
@@ -42,7 +42,7 @@ impl CloudQueue {
     /// Replaces the pending lookup with `reading` and reports whether cloud
     /// conversion is enabled. An empty reading cancels pending work.
     pub fn queue(&self, reading: String) -> bool {
-        let enabled = enabled_in(&self.directory);
+        let enabled = self.user_data.settings().cloud_conversion;
         let (lock, changed) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
         if state.enabled != enabled {
@@ -69,8 +69,8 @@ impl CloudQueue {
         enabled
     }
     /// Returns the finished result for `reading`, or nothing while it is pending.
-    pub fn poll(&self, reading: &str) -> Vec<CloudWord> {
-        if !enabled_in(&self.directory) {
+    pub fn poll(&self, reading: &str) -> Vec<CloudCandidate> {
+        if !self.user_data.settings().cloud_conversion {
             return Vec::new();
         }
         let state = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -99,7 +99,7 @@ impl Drop for CloudQueue {
     }
 }
 
-fn run_lookups(directory: &Path, shared: Shared) {
+fn run_lookups(user_data: &UserData, shared: Shared) {
     let (lock, changed) = &*shared;
     loop {
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -123,7 +123,7 @@ fn run_lookups(directory: &Path, shared: Shared) {
             continue;
         };
         drop(state);
-        let words = CloudClient::open(directory)
+        let words = CloudClient::open(user_data)
             .and_then(|mut client| client.query(&query))
             .unwrap_or_default();
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -136,23 +136,35 @@ fn run_lookups(directory: &Path, shared: Shared) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::user_data::Settings;
+
+    fn enabled_user_data(name: &str) -> UserData {
+        let user_data = UserData::at(
+            std::env::temp_dir().join(format!("simeji-{name}-{}", std::process::id())),
+        );
+        user_data
+            .save_settings(&Settings {
+                cloud_conversion: true,
+            })
+            .unwrap();
+        user_data
+    }
+
     #[test]
     fn debounces_to_the_latest_reading_without_blocking_queue() {
-        let directory =
-            std::env::temp_dir().join(format!("simeji-cloud-async-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(directory.join("cloud-enabled.json"), b"true").unwrap();
+        let user_data = enabled_user_data("cloud-async");
         let stored = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let cache = serde_json::json!([{"query":"new","stored":stored,"ttl":60,"words":[{"text":"cached new","reading":"new","property":0,"kind":0,"scene":""}]}]);
+        let cache = serde_json::json!([{"reading":"new","stored":stored,"ttl":60,"candidates":[{"text":"cached new","reading":"new","property":0,"kind":0,"scene":""}]}]);
+        std::fs::create_dir_all(user_data.cache_directory()).unwrap();
         std::fs::write(
-            directory.join("cloud-cache.json"),
+            user_data.cache_directory().join("cloud.json"),
             serde_json::to_vec(&cache).unwrap(),
         )
         .unwrap();
-        let queue = CloudQueue::new(&directory);
+        let queue = CloudQueue::new(&user_data);
         let start = std::time::Instant::now();
         queue.queue("old".into());
         queue.queue("new".into());
@@ -164,25 +176,23 @@ mod tests {
         assert_eq!(queue.poll("new")[0].text, "cached new");
         assert!(queue.poll("old").is_empty());
         drop(queue);
-        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_dir_all(user_data.root()).unwrap();
     }
+
     #[test]
     fn new_reading_and_disable_discard_previous_results() {
-        let directory =
-            std::env::temp_dir().join(format!("simeji-cloud-queue-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+        let user_data = enabled_user_data("cloud-queue");
         let queue = CloudQueue {
-            directory: directory.clone(),
+            user_data: user_data.clone(),
             shared: Shared::default(),
             thread: None,
         };
-        std::fs::write(directory.join("cloud-enabled.json"), b"true").unwrap();
         queue.queue("old".into());
         {
             let mut state = queue.shared.0.lock().unwrap();
             state.result = Some((
                 "old".into(),
-                vec![CloudWord {
+                vec![CloudCandidate {
                     text: "old candidate".into(),
                     reading: "old".into(),
                     property: 0,
@@ -195,10 +205,10 @@ mod tests {
         assert!(queue.poll("new").is_empty());
         queue.queue("new".into());
         assert!(queue.poll("old").is_empty());
-        std::fs::write(directory.join("cloud-enabled.json"), b"false").unwrap();
+        user_data.save_settings(&Settings::default()).unwrap();
         queue.queue("new".into());
         assert!(!queue.shared.0.lock().unwrap().enabled);
         assert!(queue.shared.0.lock().unwrap().pending.is_none());
-        std::fs::remove_dir_all(directory).unwrap();
+        std::fs::remove_dir_all(user_data.root()).unwrap();
     }
 }

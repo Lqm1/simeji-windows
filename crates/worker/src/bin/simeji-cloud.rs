@@ -1,13 +1,15 @@
-use simeji_worker::cloud::{CloudClient, ENDPOINT};
-use std::{error::Error, path::PathBuf};
+use simeji_worker::{
+    cloud::{CloudClient, ENDPOINT},
+    user_data::UserData,
+};
+use std::error::Error;
 
-const USAGE: &str =
-    "Usage: simeji-cloud <user-data-directory> status | enable | disable | query <reading>";
+const USAGE: &str = "Usage: simeji-cloud status | enable | disable | query <reading>";
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut args = std::env::args().skip(1);
-    let directory = PathBuf::from(args.next().ok_or(USAGE)?);
-    let mut client = CloudClient::open(&directory)?;
+    let user_data = UserData::locate().ok_or("LOCALAPPDATA is not set")?;
+    let mut client = CloudClient::open(&user_data)?;
     match args.next().as_deref() {
         Some("status") => {
             let status = if client.is_enabled() {
@@ -26,8 +28,8 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             println!("Cloud conversion disabled");
         }
         Some("query") => {
-            for word in client.query(&args.next().ok_or("Missing reading")?)? {
-                println!("{}\t{}", word.text, word.reading);
+            for candidate in client.query(&args.next().ok_or("Missing reading")?)? {
+                println!("{}\t{}", candidate.text, candidate.reading);
             }
         }
         _ => return Err(USAGE.into()),

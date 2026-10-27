@@ -27,12 +27,11 @@ try {
     }
     if (Test-Path -LiteralPath $OutputDirectory) { throw "Output directory already exists: $OutputDirectory" }
     $package = New-Item -ItemType Directory -Path $OutputDirectory
-    foreach ($name in @('simeji-worker.exe','simeji-cloud.exe','simeji-setup.exe','simeji-launcher.exe','simeji_ime.dll')) {
+    foreach ($name in @('simeji_ime.dll', 'simeji-worker.exe', 'simeji-launcher.exe', 'simeji-cloud.exe', 'simeji-setup.exe')) {
         Copy-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR ('release\' + $name)) -Destination $package.FullName
     }
-    Copy-Item -LiteralPath (Join-Path $root 'assets\dict') -Destination $package.FullName -Recurse
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1'),(Join-Path $PSScriptRoot 'uninstall.ps1') -Destination $package.FullName
-    Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $package.FullName
+    Copy-Item -LiteralPath (Join-Path $root 'assets\dictionary') -Destination (Join-Path $package.FullName 'Dictionary') -Recurse
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1'), (Join-Path $PSScriptRoot 'uninstall.ps1'), (Join-Path $root 'README.md') -Destination $package.FullName
     & (Join-Path $package.FullName 'simeji-setup.exe') verify (Join-Path $package.FullName 'simeji_ime.dll')
     if ($LASTEXITCODE -ne 0) { throw 'Packaged COM DLL verification failed' }
     Write-Output $package.FullName
