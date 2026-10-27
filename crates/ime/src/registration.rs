@@ -12,9 +12,16 @@ use windows::{
     core::*,
 };
 
-const CATEGORIES: [&GUID; 2] = [
+/// A keyboard text service with display attributes that works in Windows
+/// Store apps, without COM activation, and shows its input mode through
+/// compartments and the input indicator.
+const CATEGORIES: [&GUID; 6] = [
     &GUID_TFCAT_TIP_KEYBOARD,
     &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
+    &GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+    &GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+    &GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
+    &GUID_TFCAT_TIPCAP_COMLESS,
 ];
 /// `InstallLayoutOrTip` flag that removes the input method instead.
 const ILOT_UNINSTALL: u32 = 0x1;
@@ -43,8 +50,9 @@ pub fn verify(path: &Path) -> Result<()> {
             let mut output = std::ptr::null_mut();
             get_class(&CLSID_TEXT_SERVICE, &IClassFactory::IID, &mut output).ok()?;
             let factory = IClassFactory::from_raw(output);
-            let service: ITfTextInputProcessor = factory.CreateInstance(None)?;
+            let service: ITfTextInputProcessorEx = factory.CreateInstance(None)?;
             let _: ITfKeyEventSink = service.cast()?;
+            let _: ITfCompartmentEventSink = service.cast()?;
             let _: ITfCompositionSink = service.cast()?;
             let _: ITfDisplayAttributeProvider = service.cast()?;
             drop(service);

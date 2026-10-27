@@ -89,6 +89,8 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     const OEM_7: u32 = vk_code(VK_OEM_7);
     // \_ (ろ) on the JIS layout.
     const OEM_102: u32 = vk_code(VK_OEM_102);
+    // A character sent with SendInput, as the touch keyboard does.
+    const PACKET: u32 = vk_code(VK_PACKET);
 
     if matches!(vk, KANJI | OEM_AUTO | OEM_ENLW) {
         return Some(Key::ToggleInputMode);
@@ -109,6 +111,9 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
         DOWN => Key::Down { shift },
         HOME => Key::Home,
         END => Key::End,
+        PACKET => Key::Printable {
+            candidate_number: None,
+        },
         DIGIT_0..=DIGIT_9 | LETTER_A..=LETTER_Z | OEM_1..=OEM_3 | OEM_4..=OEM_7 | OEM_102 => {
             Key::Printable {
                 candidate_number: (DIGIT_1..=DIGIT_9)
@@ -124,7 +129,11 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
 pub(crate) fn typed_text(vk: u32, lparam: LPARAM) -> Option<String> {
     /// `ToUnicodeEx` flag: leave the keyboard state (dead keys) unchanged.
     const KEEP_KEYBOARD_STATE: u32 = 0x4;
-    let scan_code = (lparam.0 as u32 >> 16) & 0xff;
+    let scan_code = if vk == vk_code(VK_PACKET) {
+        0
+    } else {
+        (lparam.0 as u32 >> 16) & 0xff
+    };
     let mut keyboard = [0; 256];
     let mut output = [0u16; 8];
     let count = unsafe {
@@ -237,6 +246,7 @@ mod tests {
             0xdb,
             0xde,
             0xe2,
+            0xe7,
         ] {
             assert_eq!(
                 classify(vk, NONE),
