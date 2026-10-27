@@ -11,7 +11,10 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::Com::CoTaskMemFree,
+        System::{
+            Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree},
+            Variant::VARIANT,
+        },
         UI::{Input::KeyboardAndMouse::*, TextServices::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -253,13 +256,19 @@ impl State {
     }
 }
 
-#[implement(ITfTextInputProcessor, ITfKeyEventSink, ITfCompositionSink)]
+#[implement(
+    ITfTextInputProcessor,
+    ITfKeyEventSink,
+    ITfCompositionSink,
+    ITfDisplayAttributeProvider
+)]
 pub(crate) struct TextService {
     state: Rc<RefCell<State>>,
     manager: RefCell<Option<ITfThreadMgr>>,
     client: Cell<u32>,
     enabled: Cell<bool>,
     cloud_timer: RefCell<Option<CloudTimer>>,
+    atoms: Cell<[u32; 3]>,
     _lifetime: Lifetime,
 }
 impl TextService {
@@ -270,6 +279,7 @@ impl TextService {
             client: Cell::new(0),
             enabled: Cell::new(true),
             cloud_timer: RefCell::new(None),
+            atoms: Cell::new([0; 3]),
             _lifetime: Lifetime::new(),
         }
     }
@@ -280,6 +290,13 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         let keys: ITfKeystrokeMgr = manager.cast()?;
         let sink: ITfKeyEventSink = self.to_interface();
         unsafe {
+            let categories: ITfCategoryMgr =
+                CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
+            self.atoms.set([
+                categories.RegisterGUID(&crate::display::GUIDS[0])?,
+                categories.RegisterGUID(&crate::display::GUIDS[1])?,
+                categories.RegisterGUID(&crate::display::GUIDS[2])?,
+            ]);
             keys.AdviseKeyEventSink(client, &sink, true)?;
         }
         self.client.set(client);
@@ -309,6 +326,14 @@ impl ITfCompositionSink_Impl for TextService_Impl {
         Ok(())
     }
 }
+impl ITfDisplayAttributeProvider_Impl for TextService_Impl {
+    fn EnumDisplayAttributeInfo(&self) -> Result<IEnumTfDisplayAttributeInfo> {
+        Ok(crate::display::enumerator(0))
+    }
+    fn GetDisplayAttributeInfo(&self, guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
+        crate::display::get(guid)
+    }
+}
 impl TextService_Impl {
     fn edit(&self, context: &ITfContext, finish: bool, cancel: bool) -> Result<()> {
         let text = if cancel {
@@ -322,6 +347,7 @@ impl TextService_Impl {
             sink: self.to_interface(),
             text,
             finish,
+            atoms: self.atoms.get(),
             _lifetime: Lifetime::new(),
         }
         .into();
@@ -652,6 +678,7 @@ struct Edit {
     sink: ITfCompositionSink,
     text: String,
     finish: bool,
+    atoms: [u32; 3],
     _lifetime: Lifetime,
 }
 impl ITfEditSession_Impl for Edit_Impl {
@@ -676,6 +703,44 @@ impl ITfEditSession_Impl for Edit_Impl {
             let public = public_input(&self.context, cookie, &range).unwrap_or(false);
             self.state.borrow_mut().public_input = public;
             range.SetText(cookie, 0, &self.text.encode_utf16().collect::<Vec<_>>())?;
+            let property = self.context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
+            property.Clear(cookie, &range)?;
+            if !self.finish {
+                let (converted, focus) = {
+                    let state = self.state.borrow();
+                    let focus = if state.cloud_text.is_none() {
+                        state.clauses.get(state.focus).map(|clause| {
+                            (
+                                state.clauses[..state.focus]
+                                    .iter()
+                                    .map(|c| c.text.encode_utf16().count())
+                                    .sum::<usize>(),
+                                clause.text.encode_utf16().count(),
+                            )
+                        })
+                    } else {
+                        None
+                    };
+                    (!state.clauses.is_empty(), focus)
+                };
+                property.SetValue(
+                    cookie,
+                    &range,
+                    &VARIANT::from(self.atoms[usize::from(converted)] as i32),
+                )?;
+                if let Some((start, length)) = focus {
+                    let focused = range.Clone()?;
+                    let mut shifted = 0;
+                    focused.ShiftStart(cookie, start as i32, &mut shifted, std::ptr::null())?;
+                    focused.ShiftEnd(
+                        cookie,
+                        (start + length) as i32 - self.text.encode_utf16().count() as i32,
+                        &mut shifted,
+                        std::ptr::null(),
+                    )?;
+                    property.SetValue(cookie, &focused, &VARIANT::from(self.atoms[2] as i32))?;
+                }
+            }
             let caret = range.Clone()?;
             caret.Collapse(cookie, TF_ANCHOR_END)?;
             let mut selection = TF_SELECTION {

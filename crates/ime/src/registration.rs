@@ -36,6 +36,7 @@ pub fn verify(path: &Path) -> Result<()> {
             let service: ITfTextInputProcessor = factory.CreateInstance(None)?;
             let _: ITfKeyEventSink = service.cast()?;
             let _: ITfCompositionSink = service.cast()?;
+            let _: ITfDisplayAttributeProvider = service.cast()?;
             drop(service);
             drop(factory);
             if can_unload() != S_OK {
@@ -127,6 +128,7 @@ pub fn register(path: &Path) -> Result<()> {
         let categories: ITfCategoryMgr =
             CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
         categories.RegisterCategory(&SERVICE, &GUID_TFCAT_TIP_KEYBOARD, &SERVICE)?;
+        categories.RegisterCategory(&SERVICE, &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, &SERVICE)?;
         set_string(&key_path(), PCWSTR::null(), "Simeji Windows")?;
         let server = format!("{}\\InprocServer32", key_path());
         set_string(&server, PCWSTR::null(), &path.to_string_lossy())?;
@@ -153,6 +155,8 @@ pub fn unregister() -> Result<()> {
         let categories: ITfCategoryMgr =
             CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)?;
         let _ = categories.UnregisterCategory(&SERVICE, &GUID_TFCAT_TIP_KEYBOARD, &SERVICE);
+        let _ =
+            categories.UnregisterCategory(&SERVICE, &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, &SERVICE);
         let profile_result = if present {
             profiles.Unregister(&SERVICE)
         } else {
