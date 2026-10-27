@@ -31,7 +31,7 @@ python -m pip install libclang ninja
 
 `%ProgramFiles%\SimejiWindows` にプログラムと辞書を配置し、IMEをすべてのユーザー向けに登録して、実行したユーザーの入力方式に追加します。ワーカーはサインイン時に自動起動します。インストール直後は `%ProgramFiles%\SimejiWindows\simeji-launcher.exe` を通常権限のセッションから起動するか、サインインし直してください。Windowsの入力切替で「Simeji Windows」を選び、開いていたアプリを再起動して確認してください。
 
-キー操作はMicrosoft IMEに合わせています。
+キー操作はMicrosoft IMEに合わせています。日本語入力のオン・オフはタスクバーの入力インジケーター（「あ」「A」）にも表示され、クリックでも切り替えられます。
 
 | 状態 | キー | 動作 |
 | --- | --- | --- |

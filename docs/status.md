@@ -24,6 +24,14 @@ Windows IMEとして標準的な形にそろえた。プログラムは `%Progra
 - 未確認: 管理者権限での `install.ps1`・`uninstall.ps1`、`HKLM` への登録と `InstallLayoutOrTip`、アプリでの入力、AppContainerアプリからの接続。
 - 以前の版とは互換性がない。旧版の `%LOCALAPPDATA%\SimejiWindows\Versions` と `UserData` は新しい版では使わない。旧版をアンインストールしてから導入し、学習データを引き継ぐ場合は旧 `UserData` 内の学習ファイルを `Learning\` へ、`user-dictionary.json` を `%LOCALAPPDATA%\SimejiWindows` へ移す。
 
+## TSFの標準機能
+
+Microsoftの[IMEの要件](https://learn.microsoft.com/en-us/windows/apps/develop/input/input-method-editor-requirements)に合わせ、入力モードのコンパートメントと入力インジケーターのボタン、`ITfTextInputProcessorEx`、ストアアプリ対応などのカテゴリ、候補ウィンドウのDPI対応とIMEイベント、タッチキーボードの `VK_PACKET` に対応した。
+
+- 確認済み: TSFのスレッドマネージャーを使うテストで、有効化時に日本語入力がオンになること、コンパートメントの変更に入力状態が従うこと、ボタンのクリックで切り替わることを確認した。アイコンの描画と `simeji-setup verify` の新しいインターフェースも確認した。
+- 未確認: 実際の入力インジケーター（タスクバー）での表示、ストアアプリでの入力、高DPIでの候補ウィンドウの見た目、タッチキーボード。
+- 対応していないもの: IMEのブランドアイコン（デザイン素材が必要）、候補リストのUIオートメーション（ナレーター向けのUIAプロバイダーが必要）、UIレスモードと検索統合、タッチキーボードのレイアウト指定。
+
 ## 発生した問題と現在の理解
 
 ### IMEを選択しても元に戻る
