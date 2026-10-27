@@ -11,6 +11,7 @@ resolver = "3"
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 goblin = "0.10.7"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "query", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 simeji-protocol = { path = "crates/protocol" }
