@@ -14,27 +14,7 @@ use std::{
     rc::Rc,
 };
 
-/// A conversion result copied out of guest memory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Candidate {
-    pub text: String,
-    pub reading: String,
-    pub(crate) property: u32,
-    pub(crate) right_id: u16,
-    pub(crate) left_id: u16,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Clause {
-    pub text: String,
-    pub reading: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Conversion {
-    pub candidates: Vec<Candidate>,
-    pub clauses: Vec<Clause>,
-}
+pub use simeji_protocol::{Candidate, Clause, Conversion};
 
 #[derive(Clone, Deserialize, Serialize)]
 struct UserEntry {
@@ -48,6 +28,7 @@ pub struct Engine {
     host: Rc<RefCell<Host>>,
     user_words: Vec<UserEntry>,
     word_path: PathBuf,
+    faulted: bool,
 }
 
 impl Engine {
@@ -84,6 +65,7 @@ impl Engine {
             host,
             user_words: Vec::new(),
             word_path: learning_directory.join("user-dictionary.json"),
+            faulted: false,
         };
         for address in engine.libraries.initializers.clone() {
             engine.call_at(address, &[])?;
@@ -129,14 +111,27 @@ impl Engine {
         Ok(engine)
     }
     fn call_at(&mut self, address: u32, args: &[u32]) -> Result<u32, ArmError> {
+        if self.faulted {
+            return Err(ArmError::new(
+                "Engine must be reopened after a native execution failure",
+            ));
+        }
         let result = self
             .libraries
             .machine
             .call_with_limits(address, args, 30_000_000, 0);
         if let Some(error) = self.host.borrow_mut().error.take() {
+            self.faulted = true;
             return Err(error);
         }
+        if result.is_err() {
+            self.faulted = true;
+        }
         result
+    }
+
+    pub fn is_faulted(&self) -> bool {
+        self.faulted
     }
     fn call(&mut self, name: &str, args: &[u32]) -> Result<u32, ArmError> {
         let address = self.libraries.symbol(name)?;
