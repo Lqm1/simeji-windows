@@ -1,6 +1,6 @@
 //! TSF display attributes for the reading, converted text and the focused clause.
 
-use crate::server::DllRef;
+use crate::dll::DllRef;
 use std::cell::Cell;
 use windows::{
     Win32::{
@@ -62,9 +62,9 @@ impl Attribute {
 /// The atoms TSF assigned to the attribute GUIDs. `GUID_PROP_ATTRIBUTE`
 /// values refer to attributes by atom.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Atoms([u32; 3]);
+pub(crate) struct AttributeAtoms([u32; 3]);
 
-impl Atoms {
+impl AttributeAtoms {
     pub fn register() -> Result<Self> {
         let categories: ITfCategoryMgr =
             unsafe { CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)? };
@@ -81,7 +81,7 @@ impl Atoms {
 }
 
 fn info(attribute: Attribute) -> ITfDisplayAttributeInfo {
-    Info {
+    AttributeInfo {
         attribute,
         value: Cell::new(attribute.style()),
         _dll: DllRef::new(),
@@ -90,12 +90,12 @@ fn info(attribute: Attribute) -> ITfDisplayAttributeInfo {
 }
 
 #[implement(ITfDisplayAttributeInfo)]
-struct Info {
+struct AttributeInfo {
     attribute: Attribute,
     value: Cell<TF_DISPLAYATTRIBUTE>,
     _dll: DllRef,
 }
-impl ITfDisplayAttributeInfo_Impl for Info_Impl {
+impl ITfDisplayAttributeInfo_Impl for AttributeInfo_Impl {
     fn GetGUID(&self) -> Result<GUID> {
         Ok(self.attribute.guid())
     }
@@ -125,13 +125,13 @@ impl ITfDisplayAttributeInfo_Impl for Info_Impl {
 }
 
 #[implement(IEnumTfDisplayAttributeInfo)]
-struct Enumerator {
+struct AttributeEnumerator {
     position: Cell<usize>,
     _dll: DllRef,
 }
-impl IEnumTfDisplayAttributeInfo_Impl for Enumerator_Impl {
+impl IEnumTfDisplayAttributeInfo_Impl for AttributeEnumerator_Impl {
     fn Clone(&self) -> Result<IEnumTfDisplayAttributeInfo> {
-        Ok(enumerator(self.position.get()))
+        Ok(enumerate_from(self.position.get()))
     }
     fn Reset(&self) -> Result<()> {
         self.position.set(0);
@@ -174,15 +174,15 @@ impl IEnumTfDisplayAttributeInfo_Impl for Enumerator_Impl {
     }
 }
 
-pub(crate) fn enumerator(position: usize) -> IEnumTfDisplayAttributeInfo {
-    Enumerator {
+pub(crate) fn enumerate_from(position: usize) -> IEnumTfDisplayAttributeInfo {
+    AttributeEnumerator {
         position: Cell::new(position),
         _dll: DllRef::new(),
     }
     .into()
 }
 
-pub(crate) fn get(guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
+pub(crate) fn find(guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
     if guid.is_null() {
         return Err(E_POINTER.into());
     }

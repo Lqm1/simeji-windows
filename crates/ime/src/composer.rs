@@ -1,10 +1,10 @@
 //! The composition state machine: romaji input, conversion, clause focus,
 //! candidate selection, commit and cancel.
 //!
-//! It does not touch TSF. Each key updates the state and queues [`Effect`]s,
-//! which the text service then applies to the document in order. Effects
-//! queued before a worker failure stay queued, so a commit made earlier in
-//! the same key still reaches the document.
+//! It does not touch TSF. Each key updates the state and queues [`Effect`]s
+//! for the text service to apply in order. Effects queued before a worker
+//! failure stay queued, so a commit made earlier in the same key still
+//! reaches the document.
 
 use crate::{
     candidates::{CandidateList, Page},
@@ -17,48 +17,47 @@ use std::ops::Range;
 /// Typing beyond this much romaji first commits what was typed so far.
 const MAX_ROMAJI_BYTES: usize = 512;
 
-/// What the document shows for the composition.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct View {
+pub(crate) struct CompositionView {
     pub text: String,
-    /// Whether `text` is conversion output rather than the typed reading.
     pub converted: bool,
-    /// UTF-16 range of the focused clause within `text`.
+    /// UTF-16 range within `text`.
     pub focus: Option<Range<usize>>,
-    /// The candidate window contents; `None` hides the window.
     pub candidates: Option<Page>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
-    /// Show the composition, starting one if needed.
-    Show(View),
-    /// Replace the composition with `text` and end it. `accepted` is the
-    /// engine candidate the user chose, to learn if the field allows it.
+    Show(CompositionView),
+    /// Replaces the composition with `text` and ends it. `learn` is the
+    /// engine candidate to learn if the field allows it.
     Commit {
         text: String,
-        accepted: Option<Candidate>,
+        learn: Option<Candidate>,
     },
-    /// Remove the composition text and end the composition.
     Cancel,
-    /// Look up cloud candidates for this reading if the field allows it.
+    /// Looks up cloud candidates for the reading if the field allows it.
     QueueCloud(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InputMode {
+    Japanese,
+    Direct,
 }
 
 #[derive(Debug)]
 pub(crate) struct Composer {
-    /// Japanese input is on. 半角/全角 switches it.
-    enabled: bool,
+    mode: InputMode,
     romaji: String,
     reading: String,
-    /// The converted sentence; empty until the user converts.
+    /// Empty until the user converts.
     clauses: Vec<Clause>,
     focus: usize,
     candidates: CandidateList,
-    /// A selected whole-sentence cloud candidate, shown instead of the clauses.
-    sentence: Option<String>,
-    /// The engine candidate to learn when the composition is committed.
-    accepted: Option<Candidate>,
+    /// Shown instead of the clauses while selected.
+    cloud_sentence: Option<String>,
+    learning_candidate: Option<Candidate>,
     cloud_enabled: bool,
     cloud_words: Vec<CloudWord>,
     effects: Vec<Effect>,
@@ -67,14 +66,14 @@ pub(crate) struct Composer {
 impl Composer {
     pub fn new() -> Self {
         Self {
-            enabled: true,
+            mode: InputMode::Japanese,
             romaji: String::new(),
             reading: String::new(),
             clauses: Vec::new(),
             focus: 0,
             candidates: CandidateList::default(),
-            sentence: None,
-            accepted: None,
+            cloud_sentence: None,
+            learning_candidate: None,
             cloud_enabled: false,
             cloud_words: Vec::new(),
             effects: Vec::new(),
@@ -92,15 +91,15 @@ impl Composer {
     /// Whether the key is for the composer rather than the application.
     pub fn accepts(&self, key: Key) -> bool {
         match key {
-            Key::ToggleInput => true,
-            _ if !self.enabled => false,
+            Key::ToggleInputMode => true,
+            _ if self.mode == InputMode::Direct => false,
             Key::Printable { .. } => true,
             _ => self.is_composing(),
         }
     }
 
     /// Handles a key and returns whether it was consumed. `typed` yields the
-    /// text the key types; it is only asked for keys that type text.
+    /// text of a key that types text and is not called for other keys.
     pub fn press(
         &mut self,
         key: Key,
@@ -111,21 +110,24 @@ impl Composer {
             return Ok(false);
         }
         match key {
-            Key::ToggleInput => {
+            Key::ToggleInputMode => {
                 if self.is_composing() {
                     self.commit();
                 }
-                self.enabled = !self.enabled;
+                self.mode = match self.mode {
+                    InputMode::Japanese => InputMode::Direct,
+                    InputMode::Direct => InputMode::Japanese,
+                };
             }
             Key::Enter => self.commit(),
             Key::Escape if self.is_converting() => {
-                self.revert();
+                self.leave_conversion();
                 self.show();
             }
             Key::Escape => self.cancel(),
             Key::Space { reverse } => {
                 if self.is_converting() {
-                    self.step(if reverse { -1 } else { 1 });
+                    self.move_selection(if reverse { -1 } else { 1 });
                 } else {
                     self.convert(converter)?;
                 }
@@ -137,34 +139,32 @@ impl Composer {
                 } else {
                     (self.focus + 1).min(self.clauses.len() - 1)
                 };
-                self.load_candidates(converter)?;
+                self.load_clause_candidates(converter)?;
                 self.show();
             }
             Key::Up | Key::Down if self.is_converting() => {
-                self.step(if key == Key::Up { -1 } else { 1 });
+                self.move_selection(if key == Key::Up { -1 } else { 1 });
                 self.show();
             }
             Key::Printable {
-                candidate: Some(number),
+                candidate_number: Some(number),
             } if !self.candidates.is_empty() => {
-                if self.candidates.pick(number).is_some() {
+                if self.candidates.select_number(number).is_some() {
                     self.apply_selection();
                     self.commit();
                 }
             }
             Key::Backspace => {
                 self.romaji.pop();
-                self.revert();
-                return self.refresh(converter);
+                self.leave_conversion();
+                return self.update_reading(converter);
             }
-            // Other printable keys type text. Arrow keys get here only
-            // before conversion; they type nothing and go to the application.
+            // Before conversion the arrow keys get here, type nothing and go to the application.
             _ => return self.type_text(typed, converter),
         }
         Ok(true)
     }
 
-    /// The effects queued since the last call, in the order to apply them.
     pub fn take_effects(&mut self) -> Vec<Effect> {
         std::mem::take(&mut self.effects)
     }
@@ -174,7 +174,7 @@ impl Composer {
         self.romaji.clear();
         self.reading.clear();
         self.focus = 0;
-        self.revert();
+        self.leave_conversion();
         self.cloud_words.clear();
     }
 
@@ -186,9 +186,9 @@ impl Composer {
         self.cloud_words.clear();
     }
 
-    /// The reading to poll cloud results for: cloud conversion is on, the
-    /// user is typing, has not converted yet and no result has arrived.
-    pub fn cloud_reading(&self) -> Option<&str> {
+    /// The reading to poll for while cloud conversion is on, the user is
+    /// typing, has not converted yet and no result has arrived.
+    pub fn cloud_lookup_reading(&self) -> Option<&str> {
         (self.cloud_enabled
             && self.is_composing()
             && !self.is_converting()
@@ -196,7 +196,7 @@ impl Composer {
         .then_some(self.reading.as_str())
     }
 
-    /// Keeps cloud results if they are still for the current, unconverted reading.
+    /// Keeps cloud results that are still for the current, unconverted reading.
     pub fn receive_cloud_words(&mut self, reading: &str, words: Vec<CloudWord>) {
         if self.reading == reading && !self.is_converting() {
             self.cloud_words = words;
@@ -218,11 +218,10 @@ impl Composer {
             self.commit();
         }
         self.romaji.push_str(&text);
-        self.refresh(converter)
+        self.update_reading(converter)
     }
 
-    /// Updates the reading after the romaji changed.
-    fn refresh(&mut self, converter: &mut impl Converter) -> Result<bool, WorkerError> {
+    fn update_reading(&mut self, converter: &mut impl Converter) -> Result<bool, WorkerError> {
         if self.romaji.is_empty() {
             self.cancel();
             return Ok(true);
@@ -236,14 +235,16 @@ impl Composer {
 
     fn convert(&mut self, converter: &mut impl Converter) -> Result<(), WorkerError> {
         let conversion = converter.convert(&self.reading)?;
-        self.accepted = conversion.candidates.into_iter().next();
+        self.learning_candidate = conversion.candidates.into_iter().next();
         self.clauses = conversion.clauses;
         self.focus = 0;
-        self.load_candidates(converter)
+        self.load_clause_candidates(converter)
     }
 
-    /// Fetches the alternatives for the focused clause.
-    fn load_candidates(&mut self, converter: &mut impl Converter) -> Result<(), WorkerError> {
+    fn load_clause_candidates(
+        &mut self,
+        converter: &mut impl Converter,
+    ) -> Result<(), WorkerError> {
         let Some(clause) = self.clauses.get(self.focus) else {
             return Ok(());
         };
@@ -257,41 +258,38 @@ impl Composer {
         Ok(())
     }
 
-    fn step(&mut self, step: isize) {
-        if self.candidates.step(step).is_some() {
+    fn move_selection(&mut self, step: isize) {
+        if self.candidates.move_selection(step).is_some() {
             self.apply_selection();
         }
     }
 
-    /// Puts the selected candidate into the focused clause, or shows the
-    /// selected cloud sentence in place of all clauses.
     fn apply_selection(&mut self) {
         let Some(choice) = self.candidates.selected().cloned() else {
             return;
         };
         if choice.whole_sentence {
-            self.sentence = Some(choice.candidate.text);
-            self.accepted = None;
+            self.cloud_sentence = Some(choice.candidate.text);
+            self.learning_candidate = None;
         } else if let Some(clause) = self.clauses.get_mut(self.focus) {
-            self.sentence = None;
+            self.cloud_sentence = None;
             clause.text.clone_from(&choice.candidate.text);
-            self.accepted = Some(choice.candidate);
+            self.learning_candidate = Some(choice.candidate);
         }
     }
 
-    /// Returns from conversion to the reading.
-    fn revert(&mut self) {
+    fn leave_conversion(&mut self) {
         self.clauses.clear();
         self.candidates.clear();
-        self.accepted = None;
-        self.sentence = None;
+        self.learning_candidate = None;
+        self.cloud_sentence = None;
     }
 
     fn commit(&mut self) {
         let text = self.text();
-        let accepted = self.accepted.take();
+        let learn = self.learning_candidate.take();
         self.reset();
-        self.effects.push(Effect::Commit { text, accepted });
+        self.effects.push(Effect::Commit { text, learn });
     }
 
     fn cancel(&mut self) {
@@ -304,9 +302,8 @@ impl Composer {
         self.effects.push(Effect::Show(view));
     }
 
-    /// The composition text as the document shows it.
     pub fn text(&self) -> String {
-        if let Some(sentence) = &self.sentence {
+        if let Some(sentence) = &self.cloud_sentence {
             sentence.clone()
         } else if self.clauses.is_empty() {
             self.reading.clone()
@@ -318,9 +315,9 @@ impl Composer {
         }
     }
 
-    fn view(&self) -> View {
+    fn view(&self) -> CompositionView {
         let utf16 = |text: &str| text.encode_utf16().count();
-        let focus = match (&self.sentence, self.clauses.get(self.focus)) {
+        let focus = match (&self.cloud_sentence, self.clauses.get(self.focus)) {
             (None, Some(clause)) => {
                 let start = self.clauses[..self.focus]
                     .iter()
@@ -330,7 +327,7 @@ impl Composer {
             }
             _ => None,
         };
-        View {
+        CompositionView {
             text: self.text(),
             converted: self.is_converting(),
             focus,
@@ -344,7 +341,7 @@ mod tests {
     use super::*;
     use simeji_protocol::Conversion;
 
-    /// Reads romaji back unchanged and converts every reading to the same clauses.
+    /// Returns romaji unchanged as the reading and the same clauses for every reading.
     struct Fake {
         clauses: Vec<(&'static str, &'static str)>,
         alternatives: Vec<(&'static str, Vec<&'static str>)>,
@@ -420,15 +417,17 @@ mod tests {
     fn type_text(composer: &mut Composer, converter: &mut Fake, text: &str) {
         for character in text.chars() {
             let typed = || Some(character.to_string());
-            let key = Key::Printable { candidate: None };
+            let key = Key::Printable {
+                candidate_number: None,
+            };
             assert!(composer.press(key, typed, converter).unwrap());
         }
     }
 
     const SPACE: Key = Key::Space { reverse: false };
 
-    fn reading(text: &str) -> View {
-        View {
+    fn reading(text: &str) -> CompositionView {
+        CompositionView {
             text: text.into(),
             converted: false,
             focus: None,
@@ -453,7 +452,7 @@ mod tests {
         (composer, converter)
     }
 
-    fn shown(composer: &mut Composer) -> View {
+    fn shown(composer: &mut Composer) -> CompositionView {
         match composer.take_effects().as_slice() {
             [Effect::Show(view)] => view.clone(),
             effects => panic!("expected one view, got {effects:?}"),
@@ -486,7 +485,7 @@ mod tests {
             composer.take_effects(),
             [Effect::Commit {
                 text: "ab".into(),
-                accepted: None,
+                learn: None,
             }]
         );
         assert!(!composer.is_composing());
@@ -501,7 +500,7 @@ mod tests {
         assert!(press(&mut composer, &mut converter, SPACE));
         assert_eq!(
             shown(&mut composer),
-            View {
+            CompositionView {
                 text: "今日は".into(),
                 converted: true,
                 focus: Some(0..2),
@@ -514,7 +513,7 @@ mod tests {
             composer.take_effects(),
             [Effect::Commit {
                 text: "今日は".into(),
-                accepted: Some(candidate("今日は", "kyouha")),
+                learn: Some(candidate("今日は", "kyouha")),
             }]
         );
     }
@@ -538,7 +537,7 @@ mod tests {
             composer.take_effects()[1],
             Effect::Commit {
                 text: "京は".into(),
-                accepted: Some(candidate("京", "kyou")),
+                learn: Some(candidate("京", "kyou")),
             }
         );
     }
@@ -549,7 +548,7 @@ mod tests {
         press(&mut composer, &mut converter, Key::Right);
         assert_eq!(
             shown(&mut composer),
-            View {
+            CompositionView {
                 text: "今日は".into(),
                 converted: true,
                 focus: Some(2..3),
@@ -579,19 +578,23 @@ mod tests {
         assert!(press(
             &mut composer,
             &mut converter,
-            Key::Printable { candidate: Some(5) }
+            Key::Printable {
+                candidate_number: Some(5)
+            }
         ));
         assert!(composer.take_effects().is_empty());
         assert!(press(
             &mut composer,
             &mut converter,
-            Key::Printable { candidate: Some(2) }
+            Key::Printable {
+                candidate_number: Some(2)
+            }
         ));
         assert_eq!(
             composer.take_effects(),
             [Effect::Commit {
                 text: "京は".into(),
-                accepted: Some(candidate("京", "kyou")),
+                learn: Some(candidate("京", "kyou")),
             }]
         );
     }
@@ -599,7 +602,9 @@ mod tests {
     #[test]
     fn number_keys_type_digits_before_conversion() {
         let (mut composer, mut converter) = (Composer::new(), Fake::new());
-        let key = Key::Printable { candidate: Some(1) };
+        let key = Key::Printable {
+            candidate_number: Some(1),
+        };
         assert!(
             composer
                 .press(key, || Some("1".into()), &mut converter)
@@ -645,7 +650,7 @@ mod tests {
             [
                 Effect::Commit {
                     text: "今日は".into(),
-                    accepted: Some(candidate("今日は", "kyouha")),
+                    learn: Some(candidate("今日は", "kyouha")),
                 },
                 Effect::Show(reading("a")),
                 Effect::QueueCloud("a".into()),
@@ -666,7 +671,9 @@ mod tests {
         assert!(!press(
             &mut composer,
             &mut converter,
-            Key::Printable { candidate: None }
+            Key::Printable {
+                candidate_number: None
+            }
         ));
         assert!(matches!(
             composer.take_effects().as_slice(),
@@ -679,19 +686,21 @@ mod tests {
         let (mut composer, mut converter) = (Composer::new(), Fake::new());
         type_text(&mut composer, &mut converter, "a");
         composer.take_effects();
-        assert!(press(&mut composer, &mut converter, Key::ToggleInput));
+        assert!(press(&mut composer, &mut converter, Key::ToggleInputMode));
         assert_eq!(
             composer.take_effects(),
             [Effect::Commit {
                 text: "a".into(),
-                accepted: None,
+                learn: None,
             }]
         );
-        let printable = Key::Printable { candidate: None };
+        let printable = Key::Printable {
+            candidate_number: None,
+        };
         assert!(!composer.accepts(printable));
         assert!(!press(&mut composer, &mut converter, printable));
-        assert!(composer.accepts(Key::ToggleInput));
-        assert!(press(&mut composer, &mut converter, Key::ToggleInput));
+        assert!(composer.accepts(Key::ToggleInputMode));
+        assert!(press(&mut composer, &mut converter, Key::ToggleInputMode));
         assert!(composer.accepts(printable));
         assert!(composer.take_effects().is_empty());
     }
@@ -707,7 +716,7 @@ mod tests {
             [
                 Effect::Commit {
                     text: "a".repeat(MAX_ROMAJI_BYTES),
-                    accepted: None,
+                    learn: None,
                 },
                 Effect::Show(reading("b")),
             ]
@@ -719,7 +728,9 @@ mod tests {
         let (mut composer, mut converter) = converted();
         converter.fail = true;
         let result = composer.press(
-            Key::Printable { candidate: None },
+            Key::Printable {
+                candidate_number: None,
+            },
             || Some("a".into()),
             &mut converter,
         );
@@ -728,7 +739,7 @@ mod tests {
             composer.take_effects(),
             [Effect::Commit {
                 text: "今日は".into(),
-                accepted: Some(candidate("今日は", "kyouha")),
+                learn: Some(candidate("今日は", "kyouha")),
             }]
         );
         assert!(composer.is_composing());
@@ -739,7 +750,7 @@ mod tests {
         let (mut composer, mut converter) = (Composer::new(), Fake::new());
         composer.set_cloud_enabled(true);
         type_text(&mut composer, &mut converter, "kyouha");
-        assert_eq!(composer.cloud_reading(), Some("kyouha"));
+        assert_eq!(composer.cloud_lookup_reading(), Some("kyouha"));
         let words = vec![CloudWord {
             text: "今日は晴れ".into(),
             reading: "kyouha".into(),
@@ -748,9 +759,9 @@ mod tests {
             scene: String::new(),
         }];
         composer.receive_cloud_words("kyou", words.clone());
-        assert_eq!(composer.cloud_reading(), Some("kyouha"));
+        assert_eq!(composer.cloud_lookup_reading(), Some("kyouha"));
         composer.receive_cloud_words("kyouha", words);
-        assert_eq!(composer.cloud_reading(), None);
+        assert_eq!(composer.cloud_lookup_reading(), None);
         composer.take_effects();
         press(&mut composer, &mut converter, SPACE);
         assert_eq!(
@@ -765,7 +776,7 @@ mod tests {
             composer.take_effects(),
             [Effect::Commit {
                 text: "今日は晴れ".into(),
-                accepted: None,
+                learn: None,
             }]
         );
     }
@@ -774,13 +785,13 @@ mod tests {
     fn cloud_polling_waits_for_typing_and_stops_after_conversion() {
         let (mut composer, mut converter) = (Composer::new(), Fake::new());
         composer.set_cloud_enabled(true);
-        assert_eq!(composer.cloud_reading(), None);
+        assert_eq!(composer.cloud_lookup_reading(), None);
         type_text(&mut composer, &mut converter, "kyouha");
         press(&mut composer, &mut converter, SPACE);
-        assert_eq!(composer.cloud_reading(), None);
+        assert_eq!(composer.cloud_lookup_reading(), None);
         composer.set_cloud_enabled(false);
         press(&mut composer, &mut converter, Key::Escape);
-        assert_eq!(composer.cloud_reading(), None);
+        assert_eq!(composer.cloud_lookup_reading(), None);
     }
 
     #[test]

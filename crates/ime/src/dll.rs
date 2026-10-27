@@ -11,7 +11,6 @@ use windows::{
     core::*,
 };
 
-/// `DllMain` reason for the DLL being loaded into a process.
 const DLL_PROCESS_ATTACH: u32 = 1;
 
 static MODULE: AtomicUsize = AtomicUsize::new(0);
@@ -127,7 +126,7 @@ pub extern "system" fn DllUnregisterServer() -> HRESULT {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::display::Attribute;
+    use crate::display_attributes::Attribute;
     use windows::Win32::UI::TextServices::*;
 
     #[test]

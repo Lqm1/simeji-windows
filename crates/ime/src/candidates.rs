@@ -15,7 +15,6 @@ pub(crate) struct Choice {
     pub whole_sentence: bool,
 }
 
-/// The page of candidates around the selection, as the window shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Page {
     pub items: Vec<String>,
@@ -88,7 +87,7 @@ impl CandidateList {
     }
 
     /// Moves the selection by `step`, wrapping around at both ends.
-    pub fn step(&mut self, step: isize) -> Option<&Choice> {
+    pub fn move_selection(&mut self, step: isize) -> Option<&Choice> {
         let count = self.choices.len() as isize;
         if count == 0 {
             return None;
@@ -98,7 +97,7 @@ impl CandidateList {
     }
 
     /// Selects the candidate shown with `number` (1-based) on the current page.
-    pub fn pick(&mut self, number: usize) -> Option<&Choice> {
+    pub fn select_number(&mut self, number: usize) -> Option<&Choice> {
         let index = self.page_start() + number.checked_sub(1)?;
         if index >= self.choices.len() {
             return None;
@@ -211,7 +210,7 @@ mod tests {
     fn steps_wrap_and_numbers_pick_on_the_current_page() {
         let engine = (0..10).map(|n| candidate(&n.to_string())).collect();
         let mut list = CandidateList::new(engine, &[], "reading", "0");
-        assert_eq!(list.step(-1).unwrap().candidate.text, "9");
+        assert_eq!(list.move_selection(-1).unwrap().candidate.text, "9");
         assert_eq!(
             list.page(),
             Some(Page {
@@ -220,11 +219,11 @@ mod tests {
                 total: 10,
             })
         );
-        assert_eq!(list.pick(1).unwrap().candidate.text, "7");
-        assert!(list.pick(4).is_none());
-        assert_eq!(list.step(1).unwrap().candidate.text, "8");
-        assert_eq!(list.step(2).unwrap().candidate.text, "0");
-        assert_eq!(list.pick(7).unwrap().candidate.text, "6");
+        assert_eq!(list.select_number(1).unwrap().candidate.text, "7");
+        assert!(list.select_number(4).is_none());
+        assert_eq!(list.move_selection(1).unwrap().candidate.text, "8");
+        assert_eq!(list.move_selection(2).unwrap().candidate.text, "0");
+        assert_eq!(list.select_number(7).unwrap().candidate.text, "6");
         assert_eq!(list.page().unwrap().items.len(), PAGE_SIZE);
     }
 
@@ -232,7 +231,7 @@ mod tests {
     fn an_empty_list_has_no_page_or_selection() {
         let mut list = CandidateList::default();
         assert!(list.page().is_none());
-        assert!(list.step(1).is_none());
-        assert!(list.pick(1).is_none());
+        assert!(list.move_selection(1).is_none());
+        assert!(list.select_number(1).is_none());
     }
 }

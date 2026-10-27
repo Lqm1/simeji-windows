@@ -15,7 +15,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{KillTimer, SetTimer},
 };
 
-const INTERVAL_MS: u32 = 150;
+const POLL_INTERVAL_MS: u32 = 150;
 
 thread_local! {
     static TIMERS: RefCell<BTreeMap<usize, Weak<Shared>>> = const { RefCell::new(BTreeMap::new()) };
@@ -26,7 +26,7 @@ pub(crate) struct CloudTimer(usize);
 
 impl CloudTimer {
     pub fn start(shared: &Rc<Shared>) -> Option<Self> {
-        let id = unsafe { SetTimer(None, 0, INTERVAL_MS, Some(poll)) };
+        let id = unsafe { SetTimer(None, 0, POLL_INTERVAL_MS, Some(poll_cloud)) };
         if id == 0 {
             return None;
         }
@@ -44,7 +44,7 @@ impl Drop for CloudTimer {
     }
 }
 
-unsafe extern "system" fn poll(_window: HWND, _message: u32, id: usize, _time: u32) {
+unsafe extern "system" fn poll_cloud(_window: HWND, _message: u32, id: usize, _time: u32) {
     let Some(shared) = TIMERS.with(|timers| timers.borrow().get(&id).and_then(Weak::upgrade))
     else {
         return;
@@ -54,13 +54,13 @@ unsafe extern "system" fn poll(_window: HWND, _message: u32, id: usize, _time: u
         shared
             .document
             .try_borrow()
-            .is_ok_and(|document| document.public)
+            .is_ok_and(|document| document.public_field)
     };
     if !public() {
         return;
     }
     let reading = match shared.composer.try_borrow() {
-        Ok(composer) => match composer.cloud_reading() {
+        Ok(composer) => match composer.cloud_lookup_reading() {
             Some(reading) => reading.to_owned(),
             None => return,
         },

@@ -2,11 +2,10 @@
 
 use windows::Win32::{Foundation::LPARAM, UI::Input::KeyboardAndMouse::*};
 
-/// A key the text service may handle.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Key {
     /// 半角/全角 or 漢字: switches Japanese input on and off.
-    ToggleInput,
+    ToggleInputMode,
     Enter,
     Escape,
     /// Shift+Space selects the previous candidate.
@@ -21,11 +20,10 @@ pub(crate) enum Key {
     /// A key that types a character. The number keys 1–7 also select the
     /// candidate with that number on the shown page.
     Printable {
-        candidate: Option<usize>,
+        candidate_number: Option<usize>,
     },
 }
 
-/// Modifier keys held during a key event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Modifiers {
     pub shift: bool,
@@ -47,39 +45,39 @@ impl Modifiers {
     }
 }
 
-const fn code(key: VIRTUAL_KEY) -> u32 {
+const fn vk_code(key: VIRTUAL_KEY) -> u32 {
     key.0 as u32
 }
 
 /// Returns the key for a virtual-key code. Shortcuts with Ctrl, Alt or the
 /// Windows key belong to the application, except the input mode toggles.
 pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
-    const KANJI: u32 = code(VK_KANJI);
-    const OEM_AUTO: u32 = code(VK_OEM_AUTO);
-    const OEM_ENLW: u32 = code(VK_OEM_ENLW);
-    const BACK: u32 = code(VK_BACK);
-    const RETURN: u32 = code(VK_RETURN);
-    const ESCAPE: u32 = code(VK_ESCAPE);
-    const SPACE: u32 = code(VK_SPACE);
-    const LEFT: u32 = code(VK_LEFT);
-    const UP: u32 = code(VK_UP);
-    const RIGHT: u32 = code(VK_RIGHT);
-    const DOWN: u32 = code(VK_DOWN);
-    const DIGIT_0: u32 = code(VK_0);
-    const DIGIT_1: u32 = code(VK_1);
-    const DIGIT_7: u32 = code(VK_7);
-    const DIGIT_9: u32 = code(VK_9);
-    const LETTER_A: u32 = code(VK_A);
-    const LETTER_Z: u32 = code(VK_Z);
+    const KANJI: u32 = vk_code(VK_KANJI);
+    const OEM_AUTO: u32 = vk_code(VK_OEM_AUTO);
+    const OEM_ENLW: u32 = vk_code(VK_OEM_ENLW);
+    const BACK: u32 = vk_code(VK_BACK);
+    const RETURN: u32 = vk_code(VK_RETURN);
+    const ESCAPE: u32 = vk_code(VK_ESCAPE);
+    const SPACE: u32 = vk_code(VK_SPACE);
+    const LEFT: u32 = vk_code(VK_LEFT);
+    const UP: u32 = vk_code(VK_UP);
+    const RIGHT: u32 = vk_code(VK_RIGHT);
+    const DOWN: u32 = vk_code(VK_DOWN);
+    const DIGIT_0: u32 = vk_code(VK_0);
+    const DIGIT_1: u32 = vk_code(VK_1);
+    const DIGIT_7: u32 = vk_code(VK_7);
+    const DIGIT_9: u32 = vk_code(VK_9);
+    const LETTER_A: u32 = vk_code(VK_A);
+    const LETTER_Z: u32 = vk_code(VK_Z);
     // ;: =+ ,< -= .> /? @` on the JIS layout.
-    const OEM_1: u32 = code(VK_OEM_1);
-    const OEM_3: u32 = code(VK_OEM_3);
+    const OEM_1: u32 = vk_code(VK_OEM_1);
+    const OEM_3: u32 = vk_code(VK_OEM_3);
     // [{ \| ]} ^~ on the JIS layout.
-    const OEM_4: u32 = code(VK_OEM_4);
-    const OEM_7: u32 = code(VK_OEM_7);
+    const OEM_4: u32 = vk_code(VK_OEM_4);
+    const OEM_7: u32 = vk_code(VK_OEM_7);
 
     if matches!(vk, KANJI | OEM_AUTO | OEM_ENLW) {
-        return Some(Key::ToggleInput);
+        return Some(Key::ToggleInputMode);
     }
     if modifiers.control || modifiers.alt || modifiers.windows {
         return None;
@@ -96,7 +94,7 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
         UP => Key::Up,
         DOWN => Key::Down,
         DIGIT_0..=DIGIT_9 | LETTER_A..=LETTER_Z | OEM_1..=OEM_3 | OEM_4..=OEM_7 => Key::Printable {
-            candidate: (DIGIT_1..=DIGIT_7)
+            candidate_number: (DIGIT_1..=DIGIT_7)
                 .contains(&vk)
                 .then(|| (vk - DIGIT_0) as usize),
         },
@@ -144,8 +142,8 @@ mod tests {
             ..NONE
         };
         for vk in [0x19, 0xf3, 0xf4] {
-            assert_eq!(classify(vk, NONE), Some(Key::ToggleInput));
-            assert_eq!(classify(vk, control), Some(Key::ToggleInput));
+            assert_eq!(classify(vk, NONE), Some(Key::ToggleInputMode));
+            assert_eq!(classify(vk, control), Some(Key::ToggleInputMode));
         }
     }
 
@@ -188,20 +186,24 @@ mod tests {
     fn number_keys_one_to_seven_select_candidates() {
         assert_eq!(
             classify(u32::from(b'0'), NONE),
-            Some(Key::Printable { candidate: None })
+            Some(Key::Printable {
+                candidate_number: None
+            })
         );
         for number in 1..=7 {
             assert_eq!(
                 classify(u32::from(b'0') + number, NONE),
                 Some(Key::Printable {
-                    candidate: Some(number as usize)
+                    candidate_number: Some(number as usize)
                 })
             );
         }
         for vk in *b"89" {
             assert_eq!(
                 classify(u32::from(vk), NONE),
-                Some(Key::Printable { candidate: None })
+                Some(Key::Printable {
+                    candidate_number: None
+                })
             );
         }
     }
@@ -209,9 +211,13 @@ mod tests {
     #[test]
     fn letters_and_punctuation_are_printable() {
         for vk in [u32::from(b'A'), u32::from(b'Z'), 0xba, 0xc0, 0xdb, 0xde] {
-            assert_eq!(classify(vk, NONE), Some(Key::Printable { candidate: None }));
+            assert_eq!(
+                classify(vk, NONE),
+                Some(Key::Printable {
+                    candidate_number: None
+                })
+            );
         }
-        // Function, navigation and other OEM keys are left to the application.
         for vk in [0x70, 0x24, 0x2e, 0xc1, 0xe2] {
             assert_eq!(classify(vk, NONE), None);
         }

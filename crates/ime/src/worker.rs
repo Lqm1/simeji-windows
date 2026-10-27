@@ -84,7 +84,7 @@ impl Worker {
     }
 }
 
-fn unexpected(response: Response) -> WorkerError {
+fn unexpected_response(response: Response) -> WorkerError {
     match response {
         Response::Error(message) => WorkerError::Failed(message),
         _ => WorkerError::Unexpected,
@@ -98,7 +98,7 @@ impl Converter for Worker {
         };
         match Self::request(&request, REQUEST_TIMEOUT)? {
             Response::Text(text) => Ok(text),
-            response => Err(unexpected(response)),
+            response => Err(unexpected_response(response)),
         }
     }
 
@@ -108,7 +108,7 @@ impl Converter for Worker {
         };
         match Self::request(&request, REQUEST_TIMEOUT)? {
             Response::Conversion(conversion) => Ok(conversion),
-            response => Err(unexpected(response)),
+            response => Err(unexpected_response(response)),
         }
     }
 
@@ -119,7 +119,7 @@ impl Converter for Worker {
         };
         match Self::request(&request, REQUEST_TIMEOUT)? {
             Response::Candidates(candidates) => Ok(candidates),
-            response => Err(unexpected(response)),
+            response => Err(unexpected_response(response)),
         }
     }
 }

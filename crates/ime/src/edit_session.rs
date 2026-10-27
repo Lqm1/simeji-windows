@@ -1,10 +1,10 @@
 //! The synchronous edit session that writes the composition into the document.
 
 use crate::{
-    composer::View,
-    display::{Atoms, Attribute},
+    composer::CompositionView,
+    display_attributes::{Attribute, AttributeAtoms},
+    dll::DllRef,
     input_scope,
-    server::DllRef,
     text_service::Shared,
 };
 use std::{mem::ManuallyDrop, rc::Rc};
@@ -18,9 +18,8 @@ use windows::{
 };
 
 pub(crate) enum Edit {
-    /// Show the composition with its underlines and candidate window.
-    Show(View),
-    /// Write the final text and end the composition. Empty text cancels it.
+    Show(CompositionView),
+    /// Writes the final text and ends the composition. Empty text cancels it.
     Finish(String),
 }
 
@@ -37,7 +36,7 @@ impl Edit {
 pub(crate) struct EditSession {
     context: ITfContext,
     sink: ITfCompositionSink,
-    atoms: Atoms,
+    atoms: AttributeAtoms,
     shared: Rc<Shared>,
     edit: Edit,
     _dll: DllRef,
@@ -47,7 +46,7 @@ impl EditSession {
     pub fn new(
         context: ITfContext,
         sink: ITfCompositionSink,
-        atoms: Atoms,
+        atoms: AttributeAtoms,
         shared: Rc<Shared>,
         edit: Edit,
     ) -> Self {
@@ -63,7 +62,7 @@ impl EditSession {
 
     /// The active composition, or a new one at the selection. Without a
     /// composition there is nothing to replace, so empty text starts none.
-    fn composition(&self, cookie: u32) -> Result<Option<ITfComposition>> {
+    fn active_or_new_composition(&self, cookie: u32) -> Result<Option<ITfComposition>> {
         let active = self.shared.document.borrow().composition.clone();
         if active.is_some() {
             return Ok(active);
@@ -80,13 +79,12 @@ impl EditSession {
         Ok(Some(composition))
     }
 
-    /// Underlines the composition, with a bold line under the focused clause.
     fn underline(
         &self,
         cookie: u32,
         attributes: &ITfProperty,
         range: &ITfRange,
-        view: &View,
+        view: &CompositionView,
     ) -> Result<()> {
         let attribute = if view.converted {
             Attribute::Converted
@@ -134,7 +132,7 @@ impl EditSession {
 
     /// Places the candidate window under the composition. It is left as it
     /// is when the application cannot report where the text is.
-    fn show_candidates(&self, cookie: u32, range: &ITfRange, view: &View) -> Result<()> {
+    fn show_candidates(&self, cookie: u32, range: &ITfRange, view: &CompositionView) -> Result<()> {
         unsafe {
             let active = self.context.GetActiveView()?;
             let mut rect = RECT::default();
@@ -148,9 +146,9 @@ impl EditSession {
             let parent = active.GetWnd().unwrap_or_else(|_| GetFocus());
             let mut document = self.shared.document.borrow_mut();
             match &view.candidates {
-                Some(page) => document.window.show(parent, rect, page),
+                Some(page) => document.candidate_window.show(parent, rect, page),
                 None => {
-                    document.window.hide();
+                    document.candidate_window.hide();
                     Ok(())
                 }
             }
@@ -160,14 +158,14 @@ impl EditSession {
 
 impl ITfEditSession_Impl for EditSession_Impl {
     fn DoEditSession(&self, cookie: u32) -> Result<()> {
-        let Some(composition) = self.composition(cookie)? else {
+        let Some(composition) = self.active_or_new_composition(cookie)? else {
             return Ok(());
         };
         let text = self.edit.text().encode_utf16().collect::<Vec<_>>();
         unsafe {
             let range = composition.GetRange()?;
-            let public = input_scope::is_public(&self.context, cookie, &range);
-            self.shared.document.borrow_mut().public = public;
+            let public = input_scope::is_public_field(&self.context, cookie, &range);
+            self.shared.document.borrow_mut().public_field = public;
             range.SetText(cookie, 0, &text)?;
             let attributes = self.context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
             attributes.Clear(cookie, &range)?;

@@ -5,10 +5,10 @@ use crate::{
     candidate_window::CandidateWindow,
     cloud_timer::CloudTimer,
     composer::{Composer, Effect},
-    display::{self, Atoms},
+    display_attributes::{self, AttributeAtoms},
+    dll::DllRef,
     edit_session::{Edit, EditSession},
     keys::{self, Modifiers},
-    server::DllRef,
     worker::Worker,
 };
 use std::{
@@ -35,16 +35,15 @@ pub(crate) struct Document {
     pub composition: Option<ITfComposition>,
     /// Whether the field's input scope allows cloud lookups and learning,
     /// as last read by an edit session.
-    pub public: bool,
-    pub window: CandidateWindow,
+    pub public_field: bool,
+    pub candidate_window: CandidateWindow,
 }
 
 impl Document {
-    /// Forgets an ended composition and hides the candidate window.
     pub fn clear(&mut self) {
         self.composition = None;
-        self.public = false;
-        self.window.hide();
+        self.public_field = false;
+        self.candidate_window.hide();
     }
 }
 
@@ -56,9 +55,9 @@ impl Document {
 )]
 pub(crate) struct TextService {
     shared: Rc<Shared>,
-    thread: RefCell<Option<ITfThreadMgr>>,
-    client: Cell<u32>,
-    atoms: Cell<Atoms>,
+    thread_manager: RefCell<Option<ITfThreadMgr>>,
+    client_id: Cell<u32>,
+    atoms: Cell<AttributeAtoms>,
     cloud_timer: RefCell<Option<CloudTimer>>,
     _dll: DllRef,
 }
@@ -70,15 +69,14 @@ impl TextService {
                 composer: RefCell::new(Composer::new()),
                 document: RefCell::new(Document::default()),
             }),
-            thread: RefCell::new(None),
-            client: Cell::new(0),
-            atoms: Cell::new(Atoms::default()),
+            thread_manager: RefCell::new(None),
+            client_id: Cell::new(0),
+            atoms: Cell::new(AttributeAtoms::default()),
             cloud_timer: RefCell::new(None),
             _dll: DllRef::new(),
         }
     }
 
-    /// Clears both the composer and the document state.
     fn reset(&self) {
         self.shared.document.borrow_mut().clear();
         self.shared.composer.borrow_mut().reset();
@@ -86,13 +84,12 @@ impl TextService {
 }
 
 impl TextService_Impl {
-    /// Whether the composer handles the key in the current state.
-    fn wants(&self, vk: u32) -> bool {
+    fn wants_key(&self, vk: u32) -> bool {
         keys::classify(vk, Modifiers::current())
             .is_some_and(|key| self.shared.composer.borrow().accepts(key))
     }
 
-    fn key_down(&self, context: &ITfContext, vk: u32, lparam: LPARAM) -> Result<BOOL> {
+    fn handle_key(&self, context: &ITfContext, vk: u32, lparam: LPARAM) -> Result<BOOL> {
         let Some(key) = keys::classify(vk, Modifiers::current()) else {
             return Ok(false.into());
         };
@@ -103,27 +100,27 @@ impl TextService_Impl {
         );
         // A worker failure can follow a commit made earlier in the same key;
         // that commit still has to reach the document.
-        self.apply(context)?;
+        self.apply_effects(context)?;
         Ok(handled?.into())
     }
 
-    fn apply(&self, context: &ITfContext) -> Result<()> {
+    fn apply_effects(&self, context: &ITfContext) -> Result<()> {
         let effects = self.shared.composer.borrow_mut().take_effects();
         for effect in effects {
             match effect {
-                Effect::Show(view) => self.edit(context, Edit::Show(view))?,
-                Effect::Commit { text, accepted } => {
-                    let learned = accepted.filter(|_| self.shared.document.borrow().public);
-                    self.edit(context, Edit::Finish(text))?;
+                Effect::Show(view) => self.request_edit(context, Edit::Show(view))?,
+                Effect::Commit { text, learn } => {
+                    let learned = learn.filter(|_| self.shared.document.borrow().public_field);
+                    self.request_edit(context, Edit::Finish(text))?;
                     if let Some(candidate) = learned {
                         // Stay on the COM apartment thread: a detached thread
                         // could still run this DLL after COM unloaded it.
                         Worker.learn(candidate);
                     }
                 }
-                Effect::Cancel => self.edit(context, Edit::Finish(String::new()))?,
+                Effect::Cancel => self.request_edit(context, Edit::Finish(String::new()))?,
                 Effect::QueueCloud(reading) => {
-                    let reading = if self.shared.document.borrow().public {
+                    let reading = if self.shared.document.borrow().public_field {
                         reading
                     } else {
                         String::new()
@@ -138,7 +135,7 @@ impl TextService_Impl {
 
     /// Finishes a composition left in another document before handling a
     /// key for `context`. Nothing is learned from it.
-    fn finish_elsewhere(&self, context: &ITfContext) -> Result<()> {
+    fn finish_in_previous_context(&self, context: &ITfContext) -> Result<()> {
         let composition = self.shared.document.borrow().composition.clone();
         let Some(composition) = composition else {
             return Ok(());
@@ -146,13 +143,13 @@ impl TextService_Impl {
         let previous = unsafe { composition.GetRange()?.GetContext()? };
         if previous != *context {
             let text = self.shared.composer.borrow().text();
-            self.edit(&previous, Edit::Finish(text))?;
+            self.request_edit(&previous, Edit::Finish(text))?;
             self.shared.composer.borrow_mut().reset();
         }
         Ok(())
     }
 
-    fn edit(&self, context: &ITfContext, edit: Edit) -> Result<()> {
+    fn request_edit(&self, context: &ITfContext, edit: Edit) -> Result<()> {
         let session: ITfEditSession = EditSession::new(
             context.clone(),
             self.to_interface(),
@@ -163,7 +160,7 @@ impl TextService_Impl {
         .into();
         unsafe {
             context
-                .RequestEditSession(self.client.get(), &session, TF_ES_SYNC | TF_ES_READWRITE)?
+                .RequestEditSession(self.client_id.get(), &session, TF_ES_SYNC | TF_ES_READWRITE)?
                 .ok()
         }
     }
@@ -174,23 +171,23 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         let thread = thread.ok()?;
         let keystrokes: ITfKeystrokeMgr = thread.cast()?;
         let sink: ITfKeyEventSink = self.to_interface();
-        self.atoms.set(Atoms::register()?);
+        self.atoms.set(AttributeAtoms::register()?);
         unsafe {
             keystrokes.AdviseKeyEventSink(client, &sink, true)?;
         }
-        self.client.set(client);
-        *self.thread.borrow_mut() = Some(thread.clone());
+        self.client_id.set(client);
+        *self.thread_manager.borrow_mut() = Some(thread.clone());
         *self.cloud_timer.borrow_mut() = CloudTimer::start(&self.shared);
         Ok(())
     }
 
     fn Deactivate(&self) -> Result<()> {
         self.cloud_timer.borrow_mut().take();
-        let thread = self.thread.borrow_mut().take();
+        let thread = self.thread_manager.borrow_mut().take();
         if let Some(thread) = thread {
             let keystrokes: ITfKeystrokeMgr = thread.cast()?;
             unsafe {
-                keystrokes.UnadviseKeyEventSink(self.client.get())?;
+                keystrokes.UnadviseKeyEventSink(self.client_id.get())?;
             }
         }
         self.reset();
@@ -212,10 +209,10 @@ impl ITfCompositionSink_Impl for TextService_Impl {
 
 impl ITfDisplayAttributeProvider_Impl for TextService_Impl {
     fn EnumDisplayAttributeInfo(&self) -> Result<IEnumTfDisplayAttributeInfo> {
-        Ok(display::enumerator(0))
+        Ok(display_attributes::enumerate_from(0))
     }
     fn GetDisplayAttributeInfo(&self, guid: *const GUID) -> Result<ITfDisplayAttributeInfo> {
-        display::get(guid)
+        display_attributes::find(guid)
     }
 }
 
@@ -224,8 +221,8 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         if !foreground.as_bool() {
             {
                 let mut document = self.shared.document.borrow_mut();
-                document.window.hide();
-                document.public = false;
+                document.candidate_window.hide();
+                document.public_field = false;
             }
             self.shared.composer.borrow_mut().discard_cloud_words();
         }
@@ -237,15 +234,15 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 .GetStatus()
                 .is_ok_and(|status| status.dwStaticFlags & TF_SD_READONLY == 0)
         });
-        Ok((editable && self.wants(key.0 as u32)).into())
+        Ok((editable && self.wants_key(key.0 as u32)).into())
     }
     fn OnTestKeyUp(&self, _context: Ref<ITfContext>, _key: WPARAM, _flags: LPARAM) -> Result<BOOL> {
         Ok(false.into())
     }
     fn OnKeyDown(&self, context: Ref<ITfContext>, key: WPARAM, flags: LPARAM) -> Result<BOOL> {
         let context = context.ok()?;
-        self.finish_elsewhere(context)?;
-        self.key_down(context, key.0 as u32, flags)
+        self.finish_in_previous_context(context)?;
+        self.handle_key(context, key.0 as u32, flags)
     }
     fn OnKeyUp(&self, _context: Ref<ITfContext>, _key: WPARAM, _flags: LPARAM) -> Result<BOOL> {
         Ok(false.into())

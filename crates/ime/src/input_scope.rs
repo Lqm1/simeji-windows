@@ -19,7 +19,7 @@ const MAX_SCOPES: u32 = 64;
 
 /// Whether text typed into `range` may be sent to the cloud and learned.
 /// Private fields and fields whose scope cannot be read are not.
-pub(crate) fn is_public(context: &ITfContext, cookie: u32, range: &ITfRange) -> bool {
+pub(crate) fn is_public_field(context: &ITfContext, cookie: u32, range: &ITfRange) -> bool {
     scopes_allow(context, cookie, range).unwrap_or(false)
 }
 

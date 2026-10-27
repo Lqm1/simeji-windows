@@ -1,7 +1,7 @@
 //! TSF profile and COM class registration for the current user, used by
 //! `simeji-setup` and the `DllRegisterServer` entry points.
 
-use crate::{CLSID_TEXT_SERVICE, DISPLAY_NAME, GUID_PROFILE, LANGID_JAPANESE, server};
+use crate::{CLSID_TEXT_SERVICE, DISPLAY_NAME, GUID_PROFILE, LANGID_JAPANESE, dll};
 use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
@@ -60,17 +60,17 @@ pub fn verify(path: &Path) -> Result<()> {
 /// The path of this DLL as loaded into the current process.
 pub fn module_path() -> Result<PathBuf> {
     let mut path = vec![0u16; 32768];
-    let length = unsafe { GetModuleFileNameW(Some(server::module()), &mut path) } as usize;
+    let length = unsafe { GetModuleFileNameW(Some(dll::module()), &mut path) } as usize;
     if length == 0 || length >= path.len() {
         return Err(Error::from_thread());
     }
     Ok(PathBuf::from(String::from_utf16_lossy(&path[..length])))
 }
 /// The COM class key under `HKEY_CURRENT_USER`.
-fn key_path() -> String {
+fn class_key_path() -> String {
     format!("Software\\Classes\\CLSID\\{{{CLSID_TEXT_SERVICE:?}}}")
 }
-fn set_string(path: &str, name: PCWSTR, value: &str) -> Result<()> {
+fn set_registry_string(path: &str, name: PCWSTR, value: &str) -> Result<()> {
     let path = HSTRING::from(path);
     let value = value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let bytes = value
@@ -135,10 +135,10 @@ pub fn register(path: &Path) -> Result<()> {
         for category in CATEGORIES {
             categories.RegisterCategory(&CLSID_TEXT_SERVICE, category, &CLSID_TEXT_SERVICE)?;
         }
-        set_string(&key_path(), PCWSTR::null(), DISPLAY_NAME)?;
-        let inproc = format!("{}\\InprocServer32", key_path());
-        set_string(&inproc, PCWSTR::null(), &path.to_string_lossy())?;
-        set_string(&inproc, w!("ThreadingModel"), "Apartment")?;
+        set_registry_string(&class_key_path(), PCWSTR::null(), DISPLAY_NAME)?;
+        let inproc = format!("{}\\InprocServer32", class_key_path());
+        set_registry_string(&inproc, PCWSTR::null(), &path.to_string_lossy())?;
+        set_registry_string(&inproc, w!("ThreadingModel"), "Apartment")?;
         let user_profiles: ITfInputProcessorProfiles = profiles.cast()?;
         user_profiles.EnableLanguageProfile(
             &CLSID_TEXT_SERVICE,
@@ -175,7 +175,7 @@ pub fn unregister() -> Result<()> {
         } else {
             Ok(())
         };
-        let key_result = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key_path()));
+        let key_result = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(class_key_path()));
         if key_result != ERROR_FILE_NOT_FOUND {
             key_result.ok()?;
         }

@@ -7,10 +7,10 @@ use windows::{
 };
 
 const WIDTH: i32 = 350;
+const INITIAL_HEIGHT: i32 = 200;
 const ROW_HEIGHT: i32 = 22;
 const PADDING: i32 = 10;
-/// Gap between the composition and the window.
-const OFFSET: i32 = 2;
+const GAP_BELOW_COMPOSITION: i32 = 2;
 /// Longer candidates are cut to keep the window narrow.
 const MAX_CHARACTERS: usize = 36;
 
@@ -30,7 +30,7 @@ impl CandidateWindow {
 
     /// Shows `page` below `composition`, creating the window on first use.
     pub fn show(&mut self, parent: HWND, composition: RECT, page: &Page) -> Result<()> {
-        let text = HSTRING::from(Self::lines(page));
+        let text = HSTRING::from(Self::format_page(page));
         let rows = page.total.min(PAGE_SIZE) as i32;
         unsafe {
             let window = match self.window {
@@ -46,7 +46,7 @@ impl CandidateWindow {
                 window,
                 Some(HWND_TOPMOST),
                 composition.left,
-                composition.bottom + OFFSET,
+                composition.bottom + GAP_BELOW_COMPOSITION,
                 WIDTH,
                 rows * ROW_HEIGHT + PADDING,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
@@ -55,7 +55,7 @@ impl CandidateWindow {
         Ok(())
     }
 
-    fn lines(page: &Page) -> String {
+    fn format_page(page: &Page) -> String {
         page.items
             .iter()
             .enumerate()
@@ -83,7 +83,7 @@ impl CandidateWindow {
                 0,
                 0,
                 WIDTH,
-                200,
+                INITIAL_HEIGHT,
                 Some(parent),
                 None,
                 None,
@@ -122,7 +122,7 @@ mod tests {
             selected: 1,
             total: 10,
         };
-        let lines = CandidateWindow::lines(&page);
+        let lines = CandidateWindow::format_page(&page);
         let lines = lines.split("\r\n").collect::<Vec<_>>();
         assert_eq!(lines[0], "   1  今日");
         assert_eq!(lines[1], "▶ 2  京 ");
