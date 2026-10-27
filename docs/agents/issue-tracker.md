@@ -1,6 +1,6 @@
 # Issue tracker: GitHub
 
-Issues and specs live in GitHub Issues for Lqm1/simeji-windows.
+Tasks live in GitHub Issues for Lqm1/simeji-windows. Agreed product requirements live in `docs/specification.md`; link to that document from issues instead of maintaining a second product specification.
 Use the gh CLI from this repository for issue operations.
 
 ## Conventions
