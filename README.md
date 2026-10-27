@@ -54,6 +54,8 @@ python -m pip install libclang ninja
 
 ## 開発
 
+ソースは `crates/` 以下のCargoワークスペースです。TSF DLL（`crates/ime`）、変換ワーカー（`crates/worker`）、変換エンジン（`crates/engine`）、通信（`crates/protocol`、`crates/transport`）の責務は[現在の構成](docs/architecture.md)を参照してください。
+
 所有権、モジュール分割、`Result`、テスト、FFIの扱いは[公式Rust Book](https://doc.rust-lang.org/book/)を基準にします。Windowsとの連携は[MicrosoftのTSF資料](https://learn.microsoft.com/en-us/windows/win32/tsf/text-services-framework)を参照します。
 
 ```powershell
