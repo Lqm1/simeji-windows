@@ -93,6 +93,12 @@ fn formatted(u: &Guest<'_>, format: u32, mut args: Arguments) -> Result<Vec<u8>,
             i += 1;
         }
         let mut width = 0usize;
+        if format.get(i) == Some(&b'*') {
+            let value = args.next(u, false)? as i32;
+            left |= value < 0;
+            width = value.unsigned_abs().min(1024 * 1024) as usize;
+            i += 1;
+        }
         while let Some(b'0'..=b'9') = format.get(i) {
             width = (width * 10 + usize::from(format[i] - b'0')).min(1024 * 1024);
             i += 1;
@@ -101,11 +107,19 @@ fn formatted(u: &Guest<'_>, format: u32, mut args: Arguments) -> Result<Vec<u8>,
         if format.get(i) == Some(&b'.') {
             i += 1;
             let mut n = 0;
-            while let Some(b'0'..=b'9') = format.get(i) {
-                n = (n * 10 + usize::from(format[i] - b'0')).min(1024);
+            if format.get(i) == Some(&b'*') {
+                let value = args.next(u, false)? as i32;
                 i += 1;
+                if value >= 0 {
+                    precision = Some((value as usize).min(1024 * 1024));
+                }
+            } else {
+                while let Some(b'0'..=b'9') = format.get(i) {
+                    n = (n * 10 + usize::from(format[i] - b'0')).min(1024);
+                    i += 1;
+                }
+                precision = Some(n);
             }
-            precision = Some(n);
         }
         let mut wide = false;
         if format.get(i) == Some(&b'l') {

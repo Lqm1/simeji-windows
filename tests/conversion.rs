@@ -20,6 +20,13 @@ fn converts_readings_with_the_bundled_dictionary() {
     assert!(alternatives.len() > 1);
     assert!(alternatives.iter().any(|c| c.text == "猫"));
     assert!(alternatives.iter().any(|c| c.text == "ネコ"));
+    assert!(
+        engine
+            .clause_candidates("にほんご", "")
+            .unwrap()
+            .iter()
+            .any(|c| c.text == "日本語")
+    );
     for _ in 0..5 {
         assert_eq!(engine.convert("にほんご").unwrap()[0].text, "日本語");
     }

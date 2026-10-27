@@ -23,8 +23,8 @@ jobs:
           "CARGO_TARGET_DIR=$env:RUNNER_TEMP/simeji-target" >> $env:GITHUB_ENV
           rustup show
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Lint
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --workspace --locked
