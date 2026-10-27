@@ -1,4 +1,5 @@
 //! Windows TSF in-process server. Conversion stays in the separate worker.
+mod display;
 pub mod registration;
 mod service;
 use std::{
@@ -128,6 +129,39 @@ mod tests {
                     factory.CreateInstance(None)?;
                 let _: windows::Win32::UI::TextServices::ITfKeyEventSink = service.cast()?;
                 let _: windows::Win32::UI::TextServices::ITfCompositionSink = service.cast()?;
+                {
+                    use windows::Win32::UI::TextServices::*;
+                    let provider: ITfDisplayAttributeProvider = service.cast()?;
+                    let enumerator = provider.EnumDisplayAttributeInfo()?;
+                    let mut items: [Option<ITfDisplayAttributeInfo>; 4] =
+                        std::array::from_fn(|_| None);
+                    let mut count = 0;
+                    let result = (enumerator.vtable().Next)(
+                        enumerator.as_raw(),
+                        4,
+                        items.as_mut_ptr().cast(),
+                        &mut count,
+                    );
+                    assert_eq!(result, S_FALSE);
+                    assert_eq!(count, 3);
+                    assert!(items[3].is_none());
+                    assert_eq!(
+                        items[0].as_ref().unwrap().GetGUID()?,
+                        crate::display::GUIDS[0]
+                    );
+                    let cloned = enumerator.Clone()?;
+                    assert_eq!(
+                        (cloned.vtable().Next)(
+                            cloned.as_raw(),
+                            1,
+                            items[3..].as_mut_ptr().cast(),
+                            &mut count
+                        ),
+                        S_FALSE
+                    );
+                    cloned.Reset()?;
+                    assert!(provider.GetDisplayAttributeInfo(&GUID::zeroed()).is_err());
+                }
                 drop(service);
                 factory.LockServer(true)?;
                 drop(factory);
