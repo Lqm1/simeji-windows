@@ -1,5 +1,5 @@
-//! TSF profile and COM class registration for the current user, used by
-//! `simeji-setup` and the `DllRegisterServer` entry points.
+//! Machine-wide registration of the text service, used by `simeji-setup` and
+//! the `DllRegisterServer` entry points. Registering needs administrator rights.
 
 use crate::{CLSID_TEXT_SERVICE, DISPLAY_NAME, GUID_PROFILE, LANGID_JAPANESE, dll};
 use std::path::{Path, PathBuf};
@@ -12,11 +12,12 @@ use windows::{
     core::*,
 };
 
-/// TSF categories: a keyboard text service that provides display attributes.
 const CATEGORIES: [&GUID; 2] = [
     &GUID_TFCAT_TIP_KEYBOARD,
     &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
 ];
+/// `InstallLayoutOrTip` flag that removes the input method instead.
+const ILOT_UNINSTALL: u32 = 0x1;
 
 /// Loads the packaged DLL and checks its COM exports without registering it.
 pub fn verify(path: &Path) -> Result<()> {
@@ -57,6 +58,7 @@ pub fn verify(path: &Path) -> Result<()> {
         result
     }
 }
+
 /// The path of this DLL as loaded into the current process.
 pub fn module_path() -> Result<PathBuf> {
     let mut path = vec![0u16; 32768];
@@ -66,37 +68,9 @@ pub fn module_path() -> Result<PathBuf> {
     }
     Ok(PathBuf::from(String::from_utf16_lossy(&path[..length])))
 }
-/// The COM class key under `HKEY_CURRENT_USER`.
-fn class_key_path() -> String {
-    format!("Software\\Classes\\CLSID\\{{{CLSID_TEXT_SERVICE:?}}}")
-}
-fn set_registry_string(path: &str, name: PCWSTR, value: &str) -> Result<()> {
-    let path = HSTRING::from(path);
-    let value = value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
-    let bytes = value
-        .iter()
-        .flat_map(|v| v.to_le_bytes())
-        .collect::<Vec<_>>();
-    let mut key = HKEY::default();
-    unsafe {
-        RegCreateKeyExW(
-            HKEY_CURRENT_USER,
-            &path,
-            None,
-            None,
-            REG_OPTION_NON_VOLATILE,
-            KEY_WRITE,
-            None,
-            &mut key,
-            None,
-        )
-        .ok()?;
-        let result = RegSetValueExW(key, name, Some(0), REG_SZ, Some(&bytes)).ok();
-        let _ = RegCloseKey(key);
-        result
-    }
-}
-/// Registers the DLL at `path` as the Japanese keyboard profile and enables it.
+
+/// Registers the DLL at `path` as the Japanese keyboard profile for all
+/// users and adds it to the current user's input methods.
 pub fn register(path: &Path) -> Result<()> {
     if !path.is_absolute() || !path.is_file() {
         return Err(Error::new(
@@ -104,13 +78,11 @@ pub fn register(path: &Path) -> Result<()> {
             "The IME DLL must be an existing absolute path",
         ));
     }
-    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-    initialized.ok()?;
-    let result = (|| unsafe {
+    with_com(|| unsafe {
         let profiles: ITfInputProcessorProfileMgr =
             CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
-        // Register through the current TSF API before creating our COM keys.
-        // A privilege failure must not leave an orphaned COM registration.
+        // The profile is registered before the COM class, so that missing
+        // rights do not leave a class without a profile.
         profiles
             .RegisterProfile(
                 &CLSID_TEXT_SERVICE,
@@ -121,13 +93,13 @@ pub fn register(path: &Path) -> Result<()> {
                 0,
                 Default::default(),
                 0,
-                false,
+                true,
                 0,
             )
             .map_err(|error| {
                 Error::new(
                     error.code(),
-                    "TSF RegisterProfile failed; system registration may require administrator rights",
+                    "TSF RegisterProfile failed; registration requires administrator rights",
                 )
             })?;
         let categories: ITfCategoryMgr =
@@ -135,30 +107,19 @@ pub fn register(path: &Path) -> Result<()> {
         for category in CATEGORIES {
             categories.RegisterCategory(&CLSID_TEXT_SERVICE, category, &CLSID_TEXT_SERVICE)?;
         }
-        set_registry_string(&class_key_path(), PCWSTR::null(), DISPLAY_NAME)?;
-        let inproc = format!("{}\\InprocServer32", class_key_path());
-        set_registry_string(&inproc, PCWSTR::null(), &path.to_string_lossy())?;
-        set_registry_string(&inproc, w!("ThreadingModel"), "Apartment")?;
-        let user_profiles: ITfInputProcessorProfiles = profiles.cast()?;
-        user_profiles.EnableLanguageProfile(
-            &CLSID_TEXT_SERVICE,
-            LANGID_JAPANESE,
-            &GUID_PROFILE,
-            true,
-        )?;
-        Ok(())
-    })();
-    unsafe {
-        CoUninitialize();
-    }
-    result
+        delete_class(HKEY_CURRENT_USER)?;
+        set_class_value("", None, DISPLAY_NAME)?;
+        let path = path.to_string_lossy();
+        set_class_value("InprocServer32", None, &path)?;
+        set_class_value("InprocServer32", Some(w!("ThreadingModel")), "Apartment")?;
+        install_layout_or_tip(0)
+    })
 }
-/// Removes the profile, categories and COM class that [`register`] created.
+
+/// Removes everything [`register`] created.
 pub fn unregister() -> Result<()> {
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-    }
-    let result = (|| unsafe {
+    with_com(|| unsafe {
+        let _ = install_layout_or_tip(ILOT_UNINSTALL);
         let profiles: ITfInputProcessorProfiles =
             CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)?;
         let present = profiles
@@ -170,19 +131,113 @@ pub fn unregister() -> Result<()> {
             let _ =
                 categories.UnregisterCategory(&CLSID_TEXT_SERVICE, category, &CLSID_TEXT_SERVICE);
         }
-        let profile_result = if present {
+        let profile = if present {
             profiles.Unregister(&CLSID_TEXT_SERVICE)
         } else {
             Ok(())
         };
-        let key_result = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(class_key_path()));
-        if key_result != ERROR_FILE_NOT_FOUND {
-            key_result.ok()?;
-        }
-        profile_result
-    })();
+        delete_class(HKEY_CURRENT_USER)?;
+        delete_class(HKEY_LOCAL_MACHINE)?;
+        profile
+    })
+}
+
+fn with_com(work: impl FnOnce() -> Result<()>) -> Result<()> {
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+    }
+    let result = work();
     unsafe {
         CoUninitialize();
     }
     result
+}
+
+/// `InstallLayoutOrTip` from `input.dll`, the supported way to add the
+/// profile to the user's input methods or remove it from them.
+fn install_layout_or_tip(flags: u32) -> Result<()> {
+    type InstallLayoutOrTip = unsafe extern "system" fn(PCWSTR, u32) -> BOOL;
+    let profile = HSTRING::from(input_method_id());
+    unsafe {
+        let input = LoadLibraryExW(w!("input.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32)?;
+        let result = match GetProcAddress(input, s!("InstallLayoutOrTip")) {
+            Some(function) => {
+                let install: InstallLayoutOrTip = std::mem::transmute(function);
+                install(PCWSTR(profile.as_ptr()), flags).ok()
+            }
+            None => Err(Error::from_thread()),
+        };
+        let _ = FreeLibrary(input);
+        result
+    }
+}
+
+/// `<language>:{<text service>}{<profile>}`, as `InstallLayoutOrTip` expects.
+fn input_method_id() -> String {
+    format!("{LANGID_JAPANESE:04X}:{{{CLSID_TEXT_SERVICE:?}}}{{{GUID_PROFILE:?}}}")
+}
+
+fn class_key(subkey: &str) -> HSTRING {
+    let class = format!(r"Software\Classes\CLSID\{{{CLSID_TEXT_SERVICE:?}}}");
+    HSTRING::from(if subkey.is_empty() {
+        class
+    } else {
+        format!(r"{class}\{subkey}")
+    })
+}
+
+fn set_class_value(subkey: &str, name: Option<PCWSTR>, value: &str) -> Result<()> {
+    let value = value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let bytes = value
+        .iter()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect::<Vec<_>>();
+    let mut key = HKEY::default();
+    unsafe {
+        RegCreateKeyExW(
+            HKEY_LOCAL_MACHINE,
+            &class_key(subkey),
+            None,
+            None,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            None,
+            &mut key,
+            None,
+        )
+        .ok()?;
+        let result = RegSetValueExW(
+            key,
+            name.unwrap_or(PCWSTR::null()),
+            None,
+            REG_SZ,
+            Some(&bytes),
+        )
+        .ok();
+        let _ = RegCloseKey(key);
+        result
+    }
+}
+
+/// A per-user class key would override the machine-wide one for that user.
+fn delete_class(root: HKEY) -> Result<()> {
+    let result = unsafe { RegDeleteTreeW(root, &class_key("")) };
+    if result == ERROR_FILE_NOT_FOUND {
+        Ok(())
+    } else {
+        result.ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_the_profile_for_install_layout_or_tip() {
+        assert_eq!(
+            input_method_id(),
+            "0411:{EAC9F5F0-91B4-4F85-93D8-7A1669E5D7BD}{549AE946-7705-4AF7-A1BD-37936D432991}"
+        );
+    }
 }
