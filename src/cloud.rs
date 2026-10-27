@@ -14,14 +14,7 @@ type CloudResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CloudWord {
-    pub text: String,
-    pub reading: String,
-    pub property: u32,
-    pub kind: u32,
-    pub scene: String,
-}
+pub use simeji_protocol::CloudWord;
 
 #[derive(Deserialize)]
 struct Reply {

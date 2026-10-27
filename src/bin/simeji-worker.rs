@@ -1,11 +1,18 @@
 use simeji_protocol::{Request, Response};
 use simeji_transport::{Pipe, exchange};
+use simeji_windows::cloud_worker::CloudWorker;
 use simeji_windows::{arm::ArmError, engine::Engine};
 use std::{error::Error, path::PathBuf, time::Duration};
 
-fn respond(engine: &mut Engine, request: Request) -> Result<Response, ArmError> {
+fn respond(
+    engine: &mut Engine,
+    cloud: &CloudWorker,
+    request: Request,
+) -> Result<Response, ArmError> {
     Ok(match request {
         Request::Ping => Response::Ready,
+        Request::QueueCloud { reading } => Response::CloudEnabled(cloud.queue(reading)),
+        Request::PollCloud { reading } => Response::CloudCandidates(cloud.poll(&reading)),
         Request::Transliterate { romaji } => Response::Text(engine.transliterate(&romaji)?),
         Request::Convert { reading } => Response::Conversion(engine.convert_sentence(&reading)?),
         Request::Candidates { reading, context } => {
@@ -31,11 +38,12 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             let dict=PathBuf::from(args.next().ok_or("Missing dictionary directory")?);
             let learn=PathBuf::from(args.next().ok_or("Missing learning directory")?);
             let pipe=Pipe::server()?;let mut engine=Engine::open(&dict,&learn)?;
+            let cloud=CloudWorker::new(&learn);
             loop {
                 pipe.accept()?;
                 let result=(||->Result<(),Box<dyn Error+Send+Sync>> {
                     let request=pipe.receive::<Request>(Duration::from_secs(2))?;
-                    let response=respond(&mut engine,request).unwrap_or_else(|e|Response::Error(e.to_string()));
+                    let response=respond(&mut engine,&cloud,request).unwrap_or_else(|e|Response::Error(e.to_string()));
                     pipe.send(&response,Duration::from_secs(2))?;
                     if pipe.receive::<u8>(Duration::from_secs(2))?!=0xa5 {return Err("Invalid worker acknowledgement".into());}
                     Ok(())
