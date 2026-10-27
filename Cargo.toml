@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [workspace]
-members = ["crates/protocol", "crates/transport"]
+members = ["crates/protocol", "crates/transport", "crates/ime"]
 resolver = "3"
 
 [dependencies]
