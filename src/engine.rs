@@ -5,19 +5,49 @@ use crate::{
     elf::LibrarySet,
     host::{Host, string, word, write_word},
 };
-use std::{cell::RefCell, collections::BTreeMap, path::Path, rc::Rc};
+use serde::{Deserialize, Serialize};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    io::Write,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 /// A conversion result copied out of guest memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub text: String,
     pub reading: String,
+    pub(crate) property: u32,
+    pub(crate) right_id: u16,
+    pub(crate) left_id: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clause {
+    pub text: String,
+    pub reading: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Conversion {
+    pub candidates: Vec<Candidate>,
+    pub clauses: Vec<Clause>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct UserEntry {
+    reading: String,
+    text: String,
 }
 
 /// Owns one engine session. Use it on a dedicated worker thread.
 pub struct Engine {
     libraries: LibrarySet,
     host: Rc<RefCell<Host>>,
+    user_words: Vec<UserEntry>,
+    word_path: PathBuf,
 }
 
 impl Engine {
@@ -49,7 +79,12 @@ impl Engine {
                     let _ = u.emu_stop();
                 }
             })?;
-        let mut engine = Self { libraries, host };
+        let mut engine = Self {
+            libraries,
+            host,
+            user_words: Vec::new(),
+            word_path: learning_directory.join("user-dictionary.json"),
+        };
         for address in engine.libraries.initializers.clone() {
             engine.call_at(address, &[])?;
         }
@@ -57,7 +92,7 @@ impl Engine {
             "SetJpImeShellProperties",
             &[1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 1, 0],
         )?;
-        engine.call("SetSwitch", &[0, 0])?;
+        engine.call("SetSwitch", &[64 | 256 | 512 | 1024, 0])?;
         let dict = engine.put(b"/dict/")?;
         let learn = engine.put(b"/learn/")?;
         engine.call("_Z14InitializeDictPKcS0_S0_PFvjEPFvNSt6__ndk112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEE",&[dict,learn,dict,0,0])?;
@@ -79,6 +114,18 @@ impl Engine {
         let got = 0x320b_32fau32.wrapping_add(word(u, 0x320b_33fc)?);
         let ready = word(u, got)?;
         u.mem_write(u64::from(ready), &[1])?;
+        if engine.word_path.exists() {
+            if std::fs::metadata(&engine.word_path)?.len() > 4 * 1024 * 1024 {
+                return Err(ArmError::new("User dictionary is too large"));
+            }
+            let bytes = std::fs::read(&engine.word_path)?;
+            let entries: Vec<UserEntry> = serde_json::from_slice(&bytes)
+                .map_err(|e| ArmError::new(format!("Invalid user dictionary: {e}")))?;
+            for entry in &entries {
+                engine.register_word(&entry.reading, &entry.text)?;
+            }
+            engine.user_words = entries;
+        }
         Ok(engine)
     }
     fn call_at(&mut self, address: u32, args: &[u32]) -> Result<u32, ArmError> {
@@ -122,8 +169,123 @@ impl Engine {
         self.release(p)
     }
 
+    /// Uses the engine's romaji mapping for the composition text.
+    pub fn transliterate(&mut self, romaji: &str) -> Result<String, ArmError> {
+        if romaji.len() > 4096 || romaji.contains('\0') {
+            return Err(ArmError::new("Invalid romaji input"));
+        }
+        let input = self.cpp_string(romaji.as_bytes())?;
+        let output = self.cpp_string(b"")?;
+        self.call("_ZN11jpimeassist20ConvRomajiToHiraganaERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEERS6_",&[input,output])?;
+        let u = &self.libraries.machine.emulator;
+        let header = u.mem_read_as_vec(u64::from(output), 1)?[0];
+        let (p, len) = if header & 1 == 0 {
+            (output + 1, u32::from(header >> 1))
+        } else {
+            (word(u, output + 8)?, word(u, output + 4)?)
+        };
+        if len > 16384 {
+            return Err(ArmError::new("Invalid transliteration length"));
+        }
+        let bytes = u.mem_read_as_vec(u64::from(p), len as usize)?;
+        self.drop_cpp_string(input)?;
+        self.drop_cpp_string(output)?;
+        String::from_utf8(bytes).map_err(|_| ArmError::new("Invalid transliteration text"))
+    }
+
+    fn learning_candidate(&mut self, candidate: Option<&Candidate>) -> Result<u32, ArmError> {
+        let reading =
+            self.cpp_string(candidate.map_or(b"".as_slice(), |c| c.reading.as_bytes()))?;
+        let text = self.cpp_string(candidate.map_or(b"".as_slice(), |c| c.text.as_bytes()))?;
+        let description = self.cpp_string(b"")?;
+        let p = self.host.borrow_mut().alloc(160)?;
+        self.call("_ZN14candidate_infoC2ENSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES6_jjjjjyjttS6_PNS0_6vectorIiNS4_IiEEEESA_PNS7_IS6_NS4_IS6_EEEESD_",&[p,reading,text,0,0,0,0,0,0,0,candidate.map_or(0,|c|c.property),u32::from(candidate.map_or(0,|c|c.right_id)),u32::from(candidate.map_or(0,|c|c.left_id)),description,0,0,0,0])?;
+        self.drop_cpp_string(reading)?;
+        self.drop_cpp_string(text)?;
+        self.drop_cpp_string(description)?;
+        Ok(p)
+    }
+
+    /// Learns an accepted native candidate and saves the engine's learning files.
+    pub fn learn(
+        &mut self,
+        candidate: &Candidate,
+        previous: Option<&Candidate>,
+    ) -> Result<(), ArmError> {
+        let current = self.learning_candidate(Some(candidate))?;
+        let previous = self.learning_candidate(previous)?;
+        let context = self.cpp_string(b"")?;
+        let result = self.call("Learn", &[previous, current, 1, context]);
+        self.call("_ZN14candidate_infoD2Ev", &[current])?;
+        self.call("_ZN14candidate_infoD2Ev", &[previous])?;
+        self.release(current)?;
+        self.release(previous)?;
+        self.drop_cpp_string(context)?;
+        let code = result?;
+        if (code as i32) < 0 {
+            return Err(ArmError::new(format!("Learning failed: {code}")));
+        }
+        self.call("FlushLearn", &[1])?;
+        Ok(())
+    }
+
+    /// Registers a word in the native user dictionary.
+    pub fn add_word(&mut self, reading: &str, text: &str) -> Result<(), ArmError> {
+        self.register_word(reading, text)?;
+        let mut entries = self.user_words.clone();
+        if !entries
+            .iter()
+            .any(|entry| entry.reading == reading && entry.text == text)
+        {
+            entries.push(UserEntry {
+                reading: reading.to_owned(),
+                text: text.to_owned(),
+            });
+        }
+        let bytes = serde_json::to_vec(&entries).map_err(|e| ArmError::new(e.to_string()))?;
+        if bytes.len() > 4 * 1024 * 1024 {
+            return Err(ArmError::new("User dictionary is too large"));
+        }
+        let temporary = self.word_path.with_extension("json.tmp");
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, &self.word_path)?;
+        self.user_words = entries;
+        Ok(())
+    }
+
+    fn register_word(&mut self, reading: &str, text: &str) -> Result<(), ArmError> {
+        for value in [reading, text] {
+            if value.is_empty() || value.len() > 1024 || value.contains('\0') {
+                return Err(ArmError::new("Invalid user dictionary entry"));
+            }
+        }
+        let reading = self.cpp_string(reading.as_bytes())?;
+        let text = self.cpp_string(text.as_bytes())?;
+        let p = self.host.borrow_mut().alloc(64)?;
+        self.call("_ZN10CustomTermC2ERKNSt6__ndk112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEES8_yjt",&[p,reading,text,0,0,0,0,0])?;
+        let result = self.call("CustomDictAdd", &[p]);
+        self.call("_ZN10CustomTermD2Ev", &[p])?;
+        self.release(p)?;
+        self.drop_cpp_string(reading)?;
+        self.drop_cpp_string(text)?;
+        let code = result?;
+        if (code as i32) < 0 {
+            return Err(ArmError::new(format!(
+                "User dictionary registration failed: {code}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Converts a reading using the original native dictionary and scoring.
     pub fn convert(&mut self, reading: &str) -> Result<Vec<Candidate>, ArmError> {
+        Ok(self.convert_sentence(reading)?.candidates)
+    }
+
+    pub fn convert_sentence(&mut self, reading: &str) -> Result<Conversion, ArmError> {
         self.request("GetConvertedCandidateList", reading, None)
     }
 
@@ -136,7 +298,9 @@ impl Engine {
         if context.len() > 4096 || context.contains('\0') {
             return Err(ArmError::new("Invalid conversion context"));
         }
-        self.request("GetBunsetsuCandidateList", reading, Some(context))
+        Ok(self
+            .request("GetBunsetsuCandidateList", reading, Some(context))?
+            .candidates)
     }
 
     fn request(
@@ -144,9 +308,9 @@ impl Engine {
         function: &str,
         reading: &str,
         context: Option<&str>,
-    ) -> Result<Vec<Candidate>, ArmError> {
+    ) -> Result<Conversion, ArmError> {
         if reading.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Conversion::default());
         }
         if reading.len() > 4096 || reading.contains('\0') {
             return Err(ArmError::new("Invalid conversion reading"));
@@ -169,7 +333,7 @@ impl Engine {
         self.call("FreeCandidateList", &[result])?;
         copied
     }
-    fn copy_candidates(&self, result: u32) -> Result<Vec<Candidate>, ArmError> {
+    fn copy_candidates(&self, result: u32) -> Result<Conversion, ArmError> {
         let u = &self.libraries.machine.emulator;
         if word(u, result)? == u32::MAX {
             return Err(ArmError::new("Engine conversion failed"));
@@ -183,14 +347,52 @@ impl Engine {
         for i in 0..count {
             let p = array + i * 48;
             let text = string(u, word(u, p)?)?;
-            let reading = string(u, word(u, p + 16)?)?;
+            let reading = string(u, word(u, p + 20)?)?;
             candidates.push(Candidate {
+                property: word(u, p + 36)?,
+                right_id: word(u, p + 28)? as u16,
+                left_id: (word(u, p + 28)? >> 16) as u16,
                 text: String::from_utf8(text)
                     .map_err(|_| ArmError::new("Invalid candidate text"))?,
                 reading: String::from_utf8(reading)
                     .map_err(|_| ArmError::new("Invalid candidate reading"))?,
             });
         }
-        Ok(candidates)
+        let mut clauses = Vec::new();
+        if let Some(sentence) = candidates.first() {
+            let count = word(u, result + 4)?;
+            if count > 4096 {
+                return Err(ArmError::new("Invalid clause count"));
+            }
+            let reading = sentence.reading.encode_utf16().collect::<Vec<_>>();
+            let text = sentence.text.encode_utf16().collect::<Vec<_>>();
+            let reading_offsets = word(u, result + 12)?;
+            let text_offsets = word(u, result + 16)?;
+            let (mut read_start, mut text_start) = (0, 0);
+            for i in 0..count {
+                let r = u.mem_read_as_vec(u64::from(reading_offsets) + u64::from(i) * 2, 2)?;
+                let t = u.mem_read_as_vec(u64::from(text_offsets) + u64::from(i) * 2, 2)?;
+                let read_end = usize::from(u16::from_le_bytes([r[0], r[1]]));
+                let text_end = usize::from(u16::from_le_bytes([t[0], t[1]]));
+                let r = reading
+                    .get(read_start..read_end)
+                    .ok_or_else(|| ArmError::new("Invalid reading clause boundary"))?;
+                let t = text
+                    .get(text_start..text_end)
+                    .ok_or_else(|| ArmError::new("Invalid text clause boundary"))?;
+                clauses.push(Clause {
+                    reading: String::from_utf16(r)
+                        .map_err(|_| ArmError::new("Invalid reading clause"))?,
+                    text: String::from_utf16(t)
+                        .map_err(|_| ArmError::new("Invalid text clause"))?,
+                });
+                read_start = read_end;
+                text_start = text_end;
+            }
+        }
+        Ok(Conversion {
+            candidates,
+            clauses,
+        })
     }
 }
