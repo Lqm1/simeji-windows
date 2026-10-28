@@ -97,7 +97,7 @@ impl ITfLangBarItem_Impl for InputModeButton_Impl {
             return Err(E_INVALIDARG.into());
         }
         let mut description = [0u16; 32];
-        for (slot, unit) in description.iter_mut().zip("Input mode".encode_utf16()) {
+        for (slot, unit) in description.iter_mut().zip("入力モード".encode_utf16()) {
             *slot = unit;
         }
         unsafe {

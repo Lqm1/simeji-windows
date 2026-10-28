@@ -1,94 +1,109 @@
 # Simeji Windows
 
-Windows 11 x64向けのRust製日本語IMEです。Simeji 23.6.1の変換エンジンと辞書を使い、ARMライブラリをUnicornで実行します。変換はワーカー、入力欄との連携はTSF DLLが担当します。
+Windows 11 (x64) 向けのRust製日本語入力システム（IME）です。Simeji 23.6.1の変換エンジンおよび辞書データを活用し、Unicornエミュレーター経由でARMネイティブライブラリを実行します。変換処理を行う常駐ワーカープロセスと、UI・入力連携を担うText Services Framework（TSF）対応インプロセスDLLによる2プロセス構成を採用しています。
 
-キー操作はMicrosoft IMEに、インストール・登録・データの配置はWindows IMEの標準的な形に合わせています。確認の範囲と残課題は[検証状況](docs/status.md)を参照してください。
+キー操作体系は標準的なMicrosoft IMEに準拠し、インストーラー、システム登録、データ配置もWindows IMEの標準仕様に適合しています。詳細な検証状況や既知の課題については[検証状況と残課題](docs/status.md)を参照してください。
 
-## 製品文書
+## ドキュメント
 
-- [製品仕様](docs/specification.md): 合意した目的、対象範囲、変換・クラウドの要件、開発方針。
-- [現在の構成](docs/architecture.md): TSF、ワーカー、変換エンジン、通信、配置の責務。
-- [検証状況と残課題](docs/status.md): 確認済みの範囲、発生した問題、今後の改善。
+- [製品仕様](docs/specification.md): 開発目的、対応範囲、オフライン変換およびクラウド変換の要件、開発方針。
+- [アーキテクチャ解説](docs/architecture.md): TSF連携、変換ワーカー、変換エンジン、プロセス間通信、ファイル配置の各責務。
+- [検証状況と残課題](docs/status.md): 動作検証済みの範囲、既知の課題と対応、今後の改善計画。
 
-## ビルド
+## ビルド手順
 
-Rust 1.99.1、Visual Studio C++ Build Tools、Windows SDK、CMake、Pythonを用意します。
+ビルド環境として、Rust 1.99.1以上、Visual Studio C++ Build Tools、Windows SDK、CMake、Pythonを準備します。
 
 ```powershell
 python -m pip install libclang ninja
 .\scripts\build.ps1
 ```
 
-パッケージとCargoの出力は既定で一時ディレクトリへ作成します。`CARGO_TARGET_DIR`、`LIBCLANG_PATH`、`-OutputDirectory`で変更できます。解析データはビルドに不要です。
+※パッケージおよびCargoの出力先は、既定で一時ディレクトリが使用されます。必要に応じて環境変数 `CARGO_TARGET_DIR`、`LIBCLANG_PATH`、またはスクリプトの `-OutputDirectory` 引数で出力先を指定してください。
 
-## ローカル登録
+## インストールとセットアップ
 
-ビルド結果のパッケージ内にある `install.ps1` を、同じWindowsユーザーの管理者PowerShellから実行します。
+ビルドで生成されたパッケージ内の `install.ps1` を、管理者権限のPowerShellから実行します。
 
 ```powershell
 & '生成されたパッケージのパス\install.ps1'
 ```
 
-`%ProgramFiles%\SimejiWindows` にプログラムと辞書を配置し、IMEをすべてのユーザー向けに登録して、実行したユーザーの入力方式に追加します。ワーカーはサインイン時に自動起動します。インストール直後は `%ProgramFiles%\SimejiWindows\simeji-launcher.exe` を通常権限のセッションから起動するか、サインインし直してください。Windowsの入力切替で「Simeji Windows」を選び、開いていたアプリを再起動して確認してください。
+1. プログラム本体および辞書データを `%ProgramFiles%\SimejiWindows` に配置します。
+2. システム全体（すべてのユーザー）へIMEを登録し、現在のユーザーの入力方式に追加します。
+3. 変換ワーカーはサインイン時に自動起動します。インストール直後は `%ProgramFiles%\SimejiWindows\simeji-launcher.exe` を通常権限のセッションから起動するか、Windowsにサインインし直してください。
+4. Windowsの入力切り替え（Win + Space等）で「Simeji Windows」を選択し、アプリケーションを再起動して動作を確認します。
 
-キー操作はMicrosoft IMEに合わせています。日本語入力のオン・オフはタスクバーの入力インジケーター（「あ」「A」）にも表示され、クリックでも切り替えられます。
+### キー操作一覧
 
-| 状態 | キー | 動作 |
+キーバインドは標準的なMicrosoft IMEに準拠しています。日本語入力のオン／オフはタスクバーの入力インジケーター（「あ」「A」）に表示され、アイコンをクリックしても切り替えられます。
+
+| 入力状態 | キー操作 | 動作 |
 | --- | --- | --- |
-| 共通 | 半角／全角、漢字 | 日本語入力のオン・オフ（入力中の文字は確定） |
-| 入力中 | Space | 変換 |
-| 入力中 | Enter | 確定 |
-| 入力中 | Escape | 入力の取り消し |
-| 入力中 | Backspace／Delete | カーソルの前／後ろの1文字を削除 |
-| 入力中 | ←→、Home、End | カーソル移動 |
-| 入力中 | Tab／↓、Shift+Tab／↑ | 表示中の候補を選択。Enterで確定、Escapeで読みに戻る |
-| 変換中 | Space／↓、Shift+Space／↑ | 次／前の候補 |
-| 変換中 | Shift+↓／Shift+↑ | 候補の次／前のページ |
-| 変換中 | 1～9 | 候補ウィンドウの番号の候補で確定 |
-| 変換中 | ←→、Home、End | 文節の移動 |
-| 変換中 | Shift+←→ | 文節の長さを変更 |
-| 変換中 | Escape、Backspace、Delete | 変換をやめて読みに戻る |
-| 変換中 | Enter／文字の入力 | 確定（文字の入力はその後に続けて入力） |
+| 共通 | 半角／全角、漢字 | 日本語入力のオン／オフ切り替え（未確定文字列は自動確定） |
+| 未確定入力 | Space | かな漢字変換を開始 |
+| 未確定入力 | Enter | 未確定文字列をそのまま確定 |
+| 未確定入力 | Esc | 入力の取り消し（未確定文字列を消去） |
+| 未確定入力 | Backspace / Delete | カーソルの前／後の1文字を削除 |
+| 未確定入力 | ← →、Home、End | 未確定文字列内のカーソル移動 |
+| 未確定入力 | Tab / ↓、Shift+Tab / ↑ | 表示中の予測候補を選択（Enterで確定、Escで元の読みに復帰） |
+| 変換中 | Space / ↓、Shift+Space / ↑ | 次／前の変換候補を選択 |
+| 変換中 | Shift+↓ / Shift+↑ | 候補一覧の次／前ページへ移動 |
+| 変換中 | 1～9 | 候補番号に対応する候補を直接選択・確定 |
+| 変換中 | ← →、Home、End | 文節の移動（注目文節の切り替え） |
+| 変換中 | Shift+← → | 注目文節の伸縮（区切りの変更） |
+| 変換中 | Esc、Backspace、Delete | 変換を取り消し、未確定の読み入力に戻る |
+| 変換中 | Enter / 文字入力 | 選択中の候補を確定（文字入力時は確定後に次の入力を開始） |
 
-候補ウィンドウは入力中から表示し、Spaceの1回目で文節の候補へ切り替えます。標準のMicrosoft IMEに合わせ、最大9件の番号付き一覧、選択背景と左端のマーク、ページ操作を表示します。「Tabキーを押して選択します」の案内は表示しません。Windowsのライト／ダーク設定、アクセントカラー、ハイコントラストに対応し、絵文字はカラーで表示します。
+### 候補ウィンドウの表示と挙動
 
-入力中の候補はワーカーが入力を待たせずに用意し、届き次第ウィンドウを更新します。届くまでは直前の候補が表示されたままですが、そのままTab・矢印を押すと、その時点の読みを変換して選択します。このためワーカーは入力中だけ変換エンジンをもう1つ使い（約55MB）、5分使わなければ解放します。
-
-入力の末尾の「n」は、変換・確定・カーソル移動のときに「ん」になります。
-
-タッチキーボードは日本語のレイアウトで表示します。候補のページキーは入力中なら変換、変換中なら候補のページ送りです。全画面のゲームなど候補を自分で表示するアプリでは、アプリ側の表示を使います。
+- **予測変換（サジェスト）**: 未確定入力中から非同期に候補を取得・表示し、最初のSpaceキー押下で文節変換候補へスムーズに切り替わります。
+- **UI仕様**: 最大9件の番号付き縦並びリスト、視認性の高い選択ハイライト、Windowsアクセントカラーのインジケーター、ページナビゲーションを備えています。
+- **デザイン適合**: Windowsのライト／ダークテーマ、アクセントカラー、ハイコントラスト設定に対応し、カラー絵文字の表示もサポートしています。
+- **非同期レスポンス**: 予測候補の照会はバックグラウンドのワーカープロセスで非同期に処理されるため、キー入力のレスポンスを損ないません。
+- **末尾「n」の自動補完**: 入力末尾に残った未確定の「n」は、変換・確定・カーソル移動時に自動的に「ん」へ補完されます。
+- **タッチキーボード・全画面対応**: タッチキーボード使用時は日本語最適化レイアウトに対応します。また、全画面ゲームなど自前で候補を描画するアプリケーション（UIレスモード）でも正常に動作します。
 
 ## クラウド変換
 
-初期状態はオフです。有効にすると、入力中の読みを `https://cloud.simeji.me/py` へ送ります。入力スコープがパスワード・PIN・プライベート指定、または確認に失敗した場合は送信と学習を抑止します。アプリ側が入力欄を正しく通知する必要があります。
+初期状態ではオフに設定されています。有効化すると、入力中の読み仮名がSimejiのクラウド変換API（`https://cloud.simeji.me/py`）へ送信され、豊富なクラウド辞書を利用できます。
+※パスワード入力欄、PIN入力欄、プライベート指定の入力スコープでは、プライバシー保護のためクラウド送信およびローカル学習が自動的に抑止されます。
 
-次のコマンドで切り替えます。設定は `%LOCALAPPDATA%\SimejiWindows\settings.json` に保存します。
+以下のコマンドで有効／無効を切り替えます（設定は `%LOCALAPPDATA%\SimejiWindows\settings.json` に保存されます）。
 
 ```powershell
 & "$env:ProgramFiles\SimejiWindows\simeji-cloud.exe" enable
 & "$env:ProgramFiles\SimejiWindows\simeji-cloud.exe" disable
 ```
 
-現在の読みと一致するクラウド候補は、応答が届き次第、ローカル候補の後ろに追加します。変換開始後も取得を続け、選択中の候補は動かしません。候補の右端と下部の雲マークでクラウド候補を区別します。通信失敗時もローカル変換を継続します。候補の縦表示はWindows向けで、Androidの横並び・画像表示は再現対象に含みません。
+- 取得されたクラウド候補はローカル変換候補の末尾に追加され、雲マーク（☁）で識別できます。
+- ネットワークエラー等の通信失敗時も、ローカル変換が自動的に継続されます。
 
-## ユーザー辞書と解除
+## ユーザー辞書とアンインストール
 
-ワーカー起動中に `simeji-worker.exe add-word <読み> <単語>` で登録できます。データはユーザーごとに `%LOCALAPPDATA%\SimejiWindows` へ保存します。
+変換ワーカーの起動中に以下のコマンドを実行することで、任意の単語を登録できます。
 
-| 場所 | 内容 |
+```powershell
+simeji-worker.exe add-word <読み> <単語>
+```
+
+ユーザーごとのデータは `%LOCALAPPDATA%\SimejiWindows` 配下に保存されます。
+
+| パス | 内容 |
 | --- | --- |
-| `settings.json` | 設定（クラウド変換の有効・無効） |
-| `user-dictionary.json` | ユーザー辞書 |
-| `Learning\` | 変換エンジンの学習データ |
-| `Cache\` | クラウド変換のキャッシュ。削除しても構いません |
+| `settings.json` | 動作設定（クラウド変換の有効・無効など） |
+| `user-dictionary.json` | ユーザー登録辞書 |
+| `Learning\` | 変換エンジンのローカル学習データ |
+| `Cache\` | クラウド変換のキャッシュ（削除可能） |
 
-`%ProgramFiles%\SimejiWindows\uninstall.ps1` を管理者PowerShellで実行すると、IME登録と自動起動を解除し、プログラムを削除します。ユーザーデータは残します。
+### アンインストール
 
-## 開発
+`%ProgramFiles%\SimejiWindows\uninstall.ps1` を管理者権限のPowerShellから実行すると、IME登録の解除、自動起動設定の削除、およびプログラムファイルのクリーンアップが行われます（※ユーザーデータは保持されます）。
 
-ソースは `crates/` 以下のCargoワークスペースです。TSF DLL（`crates/ime`）、変換ワーカー（`crates/worker`）、変換エンジン（`crates/engine`）、通信（`crates/protocol`、`crates/transport`）の責務は[現在の構成](docs/architecture.md)を参照してください。
+## 開発情報
 
-所有権、モジュール分割、`Result`、テスト、FFIの扱いは[公式Rust Book](https://doc.rust-lang.org/book/)を基準にします。Windowsとの連携は[MicrosoftのTSF資料](https://learn.microsoft.com/en-us/windows/win32/tsf/text-services-framework)を参照します。
+本プロジェクトは `crates/` 以下のCargoワークスペースで構成されています。
+各クレートの責務（TSF DLL: `crates/ime`、変換ワーカー: `crates/worker`、エンジンラッパー: `crates/engine`、通信基盤: `crates/protocol`, `crates/transport`）の詳細は[アーキテクチャ解説](docs/architecture.md)を参照してください。
 
 ```powershell
 cargo fmt --all --check
@@ -96,4 +111,4 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-このリポジトリは個人利用・ローカルビルド向けです。公開用のバイナリ配布やリリースは作成しません。
+※本リポジトリは個人利用およびローカルビルドを対象としており、バイナリ配布や公式リリースは行っていません。
