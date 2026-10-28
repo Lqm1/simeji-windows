@@ -1,23 +1,25 @@
-use simeji_windows::cloud::CloudClient;
+use simeji_worker::cloud::{CloudClient, ENDPOINT};
 use std::{error::Error, path::PathBuf};
+
+const USAGE: &str =
+    "Usage: simeji-cloud <user-data-directory> status | enable | disable | query <reading>";
+
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut args = std::env::args().skip(1);
-    let directory = PathBuf::from(args.next().ok_or(
-        "Usage: simeji-cloud <user-data-directory> status | enable | disable | query <reading>",
-    )?);
+    let directory = PathBuf::from(args.next().ok_or(USAGE)?);
     let mut client = CloudClient::open(&directory)?;
     match args.next().as_deref() {
-        Some("status") => println!(
-            "Cloud conversion: {}",
-            if client.enabled() {
+        Some("status") => {
+            let status = if client.is_enabled() {
                 "enabled"
             } else {
                 "disabled"
-            }
-        ),
+            };
+            println!("Cloud conversion: {status}");
+        }
         Some("enable") => {
             client.set_enabled(true)?;
-            println!("Enabled: readings will be sent to https://cloud.simeji.me/py");
+            println!("Enabled: readings will be sent to {ENDPOINT}");
         }
         Some("disable") => {
             client.set_enabled(false)?;
@@ -28,7 +30,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
                 println!("{}\t{}", word.text, word.reading);
             }
         }
-        _ => return Err("Expected status, enable, disable or query".into()),
+        _ => return Err(USAGE.into()),
     }
     Ok(())
 }

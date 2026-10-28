@@ -1,9 +1,9 @@
-use simeji_windows::engine::Engine;
+use simeji_engine::Engine;
 
 #[test]
 fn converts_readings_with_the_bundled_dictionary() {
     let learn = std::env::temp_dir().join(format!("simeji-conversion-test-{}", std::process::id()));
-    let dict = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/dict");
+    let dict = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dict");
     let mut engine = Engine::open(&dict, &learn).unwrap();
     assert_eq!(engine.transliterate("nihongo").unwrap(), "にほんご");
     for (reading, expected) in [
@@ -11,11 +11,11 @@ fn converts_readings_with_the_bundled_dictionary() {
         ("とうきょう", "東京"),
         ("ねこ", "猫"),
     ] {
-        let candidates = engine.convert(reading).unwrap();
+        let candidates = engine.convert_sentence(reading).unwrap().candidates;
         assert_eq!(candidates[0].text, expected);
     }
-    assert!(engine.convert("abc\0def").is_err());
-    assert!(engine.convert("").unwrap().is_empty());
+    assert!(engine.convert_sentence("abc\0def").is_err());
+    assert!(engine.convert_sentence("").unwrap().candidates.is_empty());
     let alternatives = engine.clause_candidates("ねこ", "").unwrap();
     assert!(alternatives.len() > 1);
     assert!(alternatives.iter().any(|c| c.text == "猫"));
@@ -28,7 +28,10 @@ fn converts_readings_with_the_bundled_dictionary() {
             .any(|c| c.text == "日本語")
     );
     for _ in 0..5 {
-        assert_eq!(engine.convert("にほんご").unwrap()[0].text, "日本語");
+        assert_eq!(
+            engine.convert_sentence("にほんご").unwrap().candidates[0].text,
+            "日本語"
+        );
     }
     let sentence = engine.convert_sentence("きょうはいいてんきですね").unwrap();
     assert!(sentence.clauses.len() > 1);

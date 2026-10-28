@@ -1,3 +1,4 @@
+//! Starts the conversion worker for the signed-in user unless it already runs.
 #![windows_subsystem = "windows"]
 use simeji_protocol::{Request, Response};
 use std::{
@@ -6,6 +7,8 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     if matches!(
@@ -16,16 +19,13 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     }
     let executable = std::env::current_exe()?;
     let directory = executable.parent().ok_or("Missing executable directory")?;
-    let data =
-        std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("Missing LOCALAPPDATA")?)
-            .join("SimejiWindows")
-            .join("UserData");
+    let data = simeji_worker::user_data_directory().ok_or("Missing LOCALAPPDATA")?;
     std::fs::create_dir_all(&data)?;
     Command::new(directory.join("simeji-worker.exe"))
         .arg("serve")
         .arg(directory.join("dict"))
         .arg(data)
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

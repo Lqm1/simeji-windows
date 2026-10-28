@@ -1,186 +1,42 @@
-//! Windows TSF in-process server. Conversion stays in the separate worker.
-mod display;
+//! Simeji Windows text input processor: a TSF in-process COM server.
+//!
+//! Windows loads this DLL into every application that receives text, so it
+//! keeps only the state of the current composition and leaves conversion to
+//! the worker process (`simeji-worker`), reached over a local pipe.
+//!
+//! The crate has two layers:
+//!
+//! - Input logic without TSF: `keys` maps virtual keys, `composer` is the
+//!   composition state machine and `candidates` builds the candidate list.
+//!   `worker` is their client for the conversion worker.
+//! - Windows integration: `dll` holds the DLL entry points and class
+//!   factory, `text_service` the TSF text input processor that applies the
+//!   composer's effects through `edit_session`, plus `display_attributes`,
+//!   the `candidate_window`, `input_scope` checks, the `cloud_timer` and
+//!   [`registration`] for `simeji-setup`.
+
+mod candidate_window;
+mod candidates;
+mod cloud_timer;
+mod composer;
+mod display_attributes;
+mod dll;
+mod edit_session;
+mod input_scope;
+mod keys;
 pub mod registration;
-mod service;
-use std::{
-    ffi::c_void,
-    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
-};
-use windows::{
-    Win32::{Foundation::*, System::Com::*},
-    core::*,
+mod text_service;
+mod worker;
+
+pub use dll::{
+    DllCanUnloadNow, DllGetClassObject, DllMain, DllRegisterServer, DllUnregisterServer,
 };
 
-pub const SERVICE: GUID = GUID::from_u128(0xeac9f5f0_91b4_4f85_93d8_7a1669e5d7bd);
-pub const PROFILE: GUID = GUID::from_u128(0x549ae946_7705_4af7_a1bd_37936d432991);
-static MODULE: AtomicUsize = AtomicUsize::new(0);
-static LIVE: AtomicU32 = AtomicU32::new(0);
-static LOCKS: AtomicU32 = AtomicU32::new(0);
-struct Lifetime;
-impl Lifetime {
-    fn new() -> Self {
-        LIVE.fetch_add(1, Ordering::SeqCst);
-        Self
-    }
-}
-impl Drop for Lifetime {
-    fn drop(&mut self) {
-        LIVE.fetch_sub(1, Ordering::SeqCst);
-    }
-}
+use windows::core::GUID;
 
-#[implement(IClassFactory)]
-struct Factory {
-    _lifetime: Lifetime,
-}
-impl IClassFactory_Impl for Factory_Impl {
-    fn CreateInstance(
-        &self,
-        outer: Ref<IUnknown>,
-        iid: *const GUID,
-        out: *mut *mut c_void,
-    ) -> Result<()> {
-        if out.is_null() || iid.is_null() {
-            return Err(E_POINTER.into());
-        }
-        unsafe {
-            *out = std::ptr::null_mut();
-        }
-        if !outer.is_null() {
-            return Err(CLASS_E_NOAGGREGATION.into());
-        }
-        let object: IUnknown = service::TextService::new().into();
-        unsafe { object.query(iid, out).ok() }
-    }
-    fn LockServer(&self, lock: BOOL) -> Result<()> {
-        if lock.as_bool() {
-            LOCKS.fetch_add(1, Ordering::SeqCst);
-        } else {
-            let _ = LOCKS.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
-        }
-        Ok(())
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "system" fn DllMain(module: HINSTANCE, reason: u32, _reserved: *mut c_void) -> BOOL {
-    if reason == 1 {
-        MODULE.store(module.0 as usize, Ordering::SeqCst);
-    }
-    true.into()
-}
-#[unsafe(no_mangle)]
-/// # Safety
-/// COM supplies readable GUID pointers and a writable interface output pointer.
-pub unsafe extern "system" fn DllGetClassObject(
-    class: *const GUID,
-    iid: *const GUID,
-    out: *mut *mut c_void,
-) -> HRESULT {
-    if class.is_null() || iid.is_null() || out.is_null() {
-        return E_POINTER;
-    }
-    unsafe {
-        *out = std::ptr::null_mut();
-    }
-    if unsafe { *class } != SERVICE {
-        return CLASS_E_CLASSNOTAVAILABLE;
-    }
-    let factory: IClassFactory = Factory {
-        _lifetime: Lifetime::new(),
-    }
-    .into();
-    unsafe { factory.query(iid, out) }
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn DllCanUnloadNow() -> HRESULT {
-    if LIVE.load(Ordering::SeqCst) == 0 && LOCKS.load(Ordering::SeqCst) == 0 {
-        S_OK
-    } else {
-        S_FALSE
-    }
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn DllRegisterServer() -> HRESULT {
-    registration::module_path()
-        .and_then(|p| registration::register(&p))
-        .map_or_else(|e| e.code(), |_| S_OK)
-}
-#[unsafe(no_mangle)]
-pub extern "system" fn DllUnregisterServer() -> HRESULT {
-    registration::unregister().map_or_else(|e| e.code(), |_| S_OK)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn com_factory_interfaces_and_unload_lifetime() -> Result<()> {
-        unsafe {
-            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
-            let result = (|| {
-                let mut output = std::ptr::null_mut();
-                assert_eq!(DllCanUnloadNow(), S_OK);
-                DllGetClassObject(&SERVICE, &IClassFactory::IID, &mut output).ok()?;
-                let factory = IClassFactory::from_raw(output);
-                assert_eq!(DllCanUnloadNow(), S_FALSE);
-                let service: windows::Win32::UI::TextServices::ITfTextInputProcessor =
-                    factory.CreateInstance(None)?;
-                let _: windows::Win32::UI::TextServices::ITfKeyEventSink = service.cast()?;
-                let _: windows::Win32::UI::TextServices::ITfCompositionSink = service.cast()?;
-                {
-                    use windows::Win32::UI::TextServices::*;
-                    let provider: ITfDisplayAttributeProvider = service.cast()?;
-                    let enumerator = provider.EnumDisplayAttributeInfo()?;
-                    let mut items: [Option<ITfDisplayAttributeInfo>; 4] =
-                        std::array::from_fn(|_| None);
-                    let mut count = 0;
-                    let result = (enumerator.vtable().Next)(
-                        enumerator.as_raw(),
-                        4,
-                        items.as_mut_ptr().cast(),
-                        &mut count,
-                    );
-                    assert_eq!(result, S_FALSE);
-                    assert_eq!(count, 3);
-                    assert!(items[3].is_none());
-                    assert_eq!(
-                        items[0].as_ref().unwrap().GetGUID()?,
-                        crate::display::GUIDS[0]
-                    );
-                    let cloned = enumerator.Clone()?;
-                    assert_eq!(
-                        (cloned.vtable().Next)(
-                            cloned.as_raw(),
-                            1,
-                            items[3..].as_mut_ptr().cast(),
-                            &mut count
-                        ),
-                        S_FALSE
-                    );
-                    cloned.Reset()?;
-                    assert!(provider.GetDisplayAttributeInfo(&GUID::zeroed()).is_err());
-                }
-                drop(service);
-                factory.LockServer(true)?;
-                drop(factory);
-                assert_eq!(DllCanUnloadNow(), S_FALSE);
-                let factory: IClassFactory = Factory {
-                    _lifetime: Lifetime::new(),
-                }
-                .into();
-                factory.LockServer(false)?;
-                drop(factory);
-                assert_eq!(DllCanUnloadNow(), S_OK);
-                assert_eq!(
-                    DllGetClassObject(std::ptr::null(), &IClassFactory::IID, &mut output),
-                    E_POINTER
-                );
-                Ok(())
-            })();
-            CoUninitialize();
-            result
-        }
-    }
-}
+pub const CLSID_TEXT_SERVICE: GUID = GUID::from_u128(0xeac9f5f0_91b4_4f85_93d8_7a1669e5d7bd);
+/// The Japanese keyboard profile of the text service.
+pub const GUID_PROFILE: GUID = GUID::from_u128(0x549ae946_7705_4af7_a1bd_37936d432991);
+/// Name shown in the Windows input selector.
+pub const DISPLAY_NAME: &str = "Simeji Windows";
+pub const LANGID_JAPANESE: u16 = 0x0411;

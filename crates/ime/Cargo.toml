@@ -1,15 +1,29 @@
 [package]
 name = "simeji-ime"
-version = "0.1.0"
-edition = "2024"
-publish = false
+description = "Windows TSF text input processor (COM in-process server) and its setup tool"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lib]
-crate-type = ["cdylib","rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-windows-core = "0.62.2"
-simeji-protocol = {path="../protocol"}
-simeji-transport = {path="../transport"}
-windows = {version="0.62.2",features=["Win32_Foundation","Win32_Graphics_Gdi","Win32_System_Com","Win32_System_LibraryLoader","Win32_System_Registry","Win32_System_Variant","Win32_System_Ole","Win32_UI_TextServices","Win32_UI_Input_KeyboardAndMouse","Win32_UI_WindowsAndMessaging"]}
+simeji-protocol.workspace = true
+simeji-transport.workspace = true
+windows-core.workspace = true
 
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Variant",
+    "Win32_System_Ole",
+    "Win32_UI_TextServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

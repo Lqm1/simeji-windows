@@ -1,4 +1,4 @@
-use simeji_windows::arm::ArmMachine;
+use simeji_engine::arm::ArmMachine;
 
 #[test]
 fn executes_arm_function_without_host_ffi() {

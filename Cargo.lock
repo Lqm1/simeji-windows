@@ -1241,6 +1241,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "simeji-engine"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "goblin",
+ "serde",
+ "serde_json",
+ "simeji-protocol",
+ "unicorn-engine",
+]
+
+[[package]]
 name = "simeji-ime"
 version = "0.1.0"
 dependencies = [
@@ -1267,17 +1279,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "simeji-windows"
+name = "simeji-worker"
 version = "0.1.0"
 dependencies = [
- "chrono",
- "goblin",
  "reqwest",
  "serde",
  "serde_json",
+ "simeji-engine",
  "simeji-protocol",
  "simeji-transport",
- "unicorn-engine",
 ]
 
 [[package]]

@@ -1,11 +1,15 @@
-//! Debounced, latest-reading-only cloud work, independent of native conversion.
-use crate::cloud::{CloudClient, CloudWord};
+//! Debounced cloud lookups for the latest reading only, off the engine thread.
+
+use super::{CloudClient, CloudWord, MAX_READING_CHARS, enabled_in};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::Duration,
 };
+
+/// Typing pauses this long before the reading is looked up.
+const DEBOUNCE: Duration = Duration::from_millis(150);
 
 #[derive(Default)]
 struct State {
@@ -16,27 +20,29 @@ struct State {
     stopped: bool,
 }
 type Shared = Arc<(Mutex<State>, Condvar)>;
-pub struct CloudWorker {
+
+pub struct CloudQueue {
     directory: PathBuf,
     shared: Shared,
     thread: Option<JoinHandle<()>>,
 }
-impl CloudWorker {
+impl CloudQueue {
     pub fn new(directory: &Path) -> Self {
         let shared = Shared::default();
         let background = shared.clone();
         let directory = directory.to_path_buf();
         let root = directory.clone();
-        let thread = thread::spawn(move || run(&root, background));
+        let thread = thread::spawn(move || run_lookups(&root, background));
         Self {
             directory,
             shared,
             thread: Some(thread),
         }
     }
+    /// Replaces the pending lookup with `reading` and reports whether cloud
+    /// conversion is enabled. An empty reading cancels pending work.
     pub fn queue(&self, reading: String) -> bool {
-        let enabled = std::fs::read(self.directory.join("cloud-enabled.json"))
-            .is_ok_and(|bytes| bytes == b"true");
+        let enabled = enabled_in(&self.directory);
         let (lock, changed) = &*self.shared;
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
         if state.enabled != enabled {
@@ -45,7 +51,7 @@ impl CloudWorker {
             state.pending = None;
         }
         state.enabled = enabled;
-        if !enabled || reading.is_empty() || reading.chars().count() > 256 {
+        if !enabled || reading.is_empty() || reading.chars().count() > MAX_READING_CHARS {
             state.generation = state.generation.wrapping_add(1);
             state.pending = None;
             state.result = None;
@@ -62,10 +68,9 @@ impl CloudWorker {
         changed.notify_one();
         enabled
     }
+    /// Returns the finished result for `reading`, or nothing while it is pending.
     pub fn poll(&self, reading: &str) -> Vec<CloudWord> {
-        if !std::fs::read(self.directory.join("cloud-enabled.json"))
-            .is_ok_and(|bytes| bytes == b"true")
-        {
+        if !enabled_in(&self.directory) {
             return Vec::new();
         }
         let state = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -80,7 +85,8 @@ impl CloudWorker {
             .unwrap_or_default()
     }
 }
-impl Drop for CloudWorker {
+
+impl Drop for CloudQueue {
     fn drop(&mut self) {
         {
             let mut state = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -92,7 +98,8 @@ impl Drop for CloudWorker {
         }
     }
 }
-fn run(directory: &Path, shared: Shared) {
+
+fn run_lookups(directory: &Path, shared: Shared) {
     let (lock, changed) = &*shared;
     loop {
         let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -104,7 +111,7 @@ fn run(directory: &Path, shared: Shared) {
         }
         let generation = state.generation;
         let (mut state, delay) = changed
-            .wait_timeout(state, Duration::from_millis(150))
+            .wait_timeout(state, DEBOUNCE)
             .unwrap_or_else(|e| e.into_inner());
         if state.stopped {
             return;
@@ -145,35 +152,34 @@ mod tests {
             serde_json::to_vec(&cache).unwrap(),
         )
         .unwrap();
-        let worker = CloudWorker::new(&directory);
+        let queue = CloudQueue::new(&directory);
         let start = std::time::Instant::now();
-        worker.queue("old".into());
-        worker.queue("new".into());
+        queue.queue("old".into());
+        queue.queue("new".into());
         assert!(start.elapsed() < Duration::from_millis(100));
-        assert!(worker.poll("new").is_empty());
-        while worker.poll("new").is_empty() && start.elapsed() < Duration::from_secs(3) {
+        assert!(queue.poll("new").is_empty());
+        while queue.poll("new").is_empty() && start.elapsed() < Duration::from_secs(3) {
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(worker.poll("new")[0].text, "cached new");
-        assert!(worker.poll("old").is_empty());
-        drop(worker);
+        assert_eq!(queue.poll("new")[0].text, "cached new");
+        assert!(queue.poll("old").is_empty());
+        drop(queue);
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn new_reading_and_disable_discard_previous_results() {
         let directory =
-            std::env::temp_dir().join(format!("simeji-cloud-worker-{}", std::process::id()));
+            std::env::temp_dir().join(format!("simeji-cloud-queue-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
-        // No background thread or networking is needed to exercise stale guards.
-        let worker = CloudWorker {
+        let queue = CloudQueue {
             directory: directory.clone(),
             shared: Shared::default(),
             thread: None,
         };
         std::fs::write(directory.join("cloud-enabled.json"), b"true").unwrap();
-        worker.queue("old".into());
+        queue.queue("old".into());
         {
-            let mut state = worker.shared.0.lock().unwrap();
+            let mut state = queue.shared.0.lock().unwrap();
             state.result = Some((
                 "old".into(),
                 vec![CloudWord {
@@ -185,14 +191,14 @@ mod tests {
                 }],
             ));
         }
-        assert_eq!(worker.poll("old").len(), 1);
-        assert!(worker.poll("new").is_empty());
-        worker.queue("new".into());
-        assert!(worker.poll("old").is_empty());
+        assert_eq!(queue.poll("old").len(), 1);
+        assert!(queue.poll("new").is_empty());
+        queue.queue("new".into());
+        assert!(queue.poll("old").is_empty());
         std::fs::write(directory.join("cloud-enabled.json"), b"false").unwrap();
-        worker.queue("new".into());
-        assert!(!worker.shared.0.lock().unwrap().enabled);
-        assert!(worker.shared.0.lock().unwrap().pending.is_none());
+        queue.queue("new".into());
+        assert!(!queue.shared.0.lock().unwrap().enabled);
+        assert!(queue.shared.0.lock().unwrap().pending.is_none());
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
