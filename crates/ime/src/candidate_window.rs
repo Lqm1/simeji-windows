@@ -84,8 +84,6 @@ impl Default for CandidateWindow {
     }
 }
 
-/// The window's top-left corner: below the composition, or above it when
-/// the window would leave the work area or cover the touch keyboard.
 fn place(
     composition: RECT,
     size: SIZE,

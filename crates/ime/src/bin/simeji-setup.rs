@@ -11,8 +11,6 @@ const USAGE: &str =
     "Usage: simeji-setup register <dll-path> | verify <dll-path> | unregister | remove <path>";
 const MOVED_ASIDE: &str = "removed";
 
-/// Deletes `path`. Files that applications still hold open, and the
-/// directories that contain them, are deleted when Windows restarts.
 fn remove(path: &Path) -> Result<(), Box<dyn Error>> {
     if path.is_dir() {
         for entry in std::fs::read_dir(path)? {
