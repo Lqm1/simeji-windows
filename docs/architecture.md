@@ -46,7 +46,7 @@ TSF・COMとの接続層:
 - `candidate_window`: アプリのウィンドウに所有される独自クラスのウィンドウ。システムの配色で描き、選択中の候補を強調する。モニターのDPIに合わせて拡大する。未確定文字の下に開き、モニターの作業領域からはみ出す場合や、タッチキーボード（`IFrameworkInputPane` の位置）に重なる場合は上に開く。表示・移動・非表示を `EVENT_OBJECT_IME_SHOW`・`EVENT_OBJECT_IME_CHANGE`・`EVENT_OBJECT_IME_HIDE` で通知する。クラス名にモジュールのアドレスを含め、別のアドレスで読み込まれた以前のDLLのクラスを使わない。
 - `candidate_accessibility`: 候補ウィンドウのUIオートメーション。Microsoftの規約どおり、オートメーションID `IME_Candidate_Window` のリストと候補ごとのリスト項目（名前は候補、選択状態付き）を公開し、表示・非表示で `MenuOpened`・`MenuClosed`、選択の変更で `ElementSelected` イベントを発生させる。
 - `candidate_element`: 候補一覧のTSF UI要素（`ITfCandidateListUIElementBehavior`、`ITfIntegratableCandidateListUIElement`）。候補の表示・変更・終了を `ITfUIElementMgr` に通知する。全画面のゲームや検索ボックスのように候補を自分で描くアプリ（UIレスモード）が非表示を求めた場合は、候補ウィンドウを出さない。アプリからの候補の選択・確定・取消は、キー操作と同じく `composer` を通して文書へ反映する。
-- `functions`: TSFの関数プロバイダー。タッチキーボードには日本語のタッチ最適化レイアウト（`TKBL_OPT_JAPANESE_ABC`）を求める。検索（`ITfFnSearchCandidateProvider`）には、1語として変換される読みならその候補一覧を、文になる読みなら変換した文を返し、選ばれた候補を学習する。
+- `functions`: TSFの関数プロバイダー。タッチキーボードには日本語のタッチ最適化レイアウト（`TKBL_OPT_JAPANESE_ABC`）を求める。検索（`ITfFnSearchCandidateProvider`）には、1語として変換される読みならその候補一覧を、文になる読みなら変換した文を返し、選ばれた候補を学習する。Microsoftの検索候補の条件どおり、読み全体の変換だけを、重複と、他の候補を先頭に含むものを除いて返す。
 - `display_attributes`、`input_scope`、`cloud_timer`、`registration`: 表示属性、入力スコープの判定、クラウド結果の取得、登録。
 
 候補ウィンドウは2回目の変換操作で開く。最初の変換で文節候補を取得しないため、変換の応答が速い。
