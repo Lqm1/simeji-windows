@@ -68,21 +68,21 @@ impl CloudQueue {
         changed.notify_one();
         enabled
     }
-    /// Returns the finished result for `reading`, or nothing while it is pending.
-    pub fn poll(&self, reading: &str) -> Vec<CloudCandidate> {
+    /// Returns the finished result for `reading`, which is empty if the
+    /// lookup failed, or `None` while it is pending.
+    pub fn poll(&self, reading: &str) -> Option<Vec<CloudCandidate>> {
         if !self.user_data.settings().cloud_conversion {
-            return Vec::new();
+            return None;
         }
         let state = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
         if !state.enabled {
-            return Vec::new();
+            return None;
         }
         state
             .result
             .as_ref()
             .filter(|(query, _)| query == reading)
             .map(|(_, words)| words.clone())
-            .unwrap_or_default()
     }
 }
 
@@ -169,12 +169,12 @@ mod tests {
         queue.queue("old".into());
         queue.queue("new".into());
         assert!(start.elapsed() < Duration::from_millis(100));
-        assert!(queue.poll("new").is_empty());
-        while queue.poll("new").is_empty() && start.elapsed() < Duration::from_secs(3) {
+        assert!(queue.poll("new").is_none());
+        while queue.poll("new").is_none() && start.elapsed() < Duration::from_secs(3) {
             thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(queue.poll("new")[0].text, "cached new");
-        assert!(queue.poll("old").is_empty());
+        assert_eq!(queue.poll("new").unwrap()[0].text, "cached new");
+        assert!(queue.poll("old").is_none());
         drop(queue);
         std::fs::remove_dir_all(user_data.root()).unwrap();
     }
@@ -201,10 +201,10 @@ mod tests {
                 }],
             ));
         }
-        assert_eq!(queue.poll("old").len(), 1);
-        assert!(queue.poll("new").is_empty());
+        assert_eq!(queue.poll("old").unwrap().len(), 1);
+        assert!(queue.poll("new").is_none());
         queue.queue("new".into());
-        assert!(queue.poll("old").is_empty());
+        assert!(queue.poll("old").is_none());
         user_data.save_settings(&Settings::default()).unwrap();
         queue.queue("new".into());
         assert!(!queue.shared.0.lock().unwrap().enabled);

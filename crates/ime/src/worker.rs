@@ -1,6 +1,6 @@
 //! Requests to the conversion worker process.
 
-use simeji_protocol::{Candidate, CloudCandidate, Conversion, Request, Response, WORKER_PIPE};
+use simeji_protocol::{Candidate, Conversion, Lookup, Request, Response, WORKER_PIPE};
 use std::{fmt, time::Duration};
 use windows::Win32::Foundation::{E_FAIL, E_UNEXPECTED};
 
@@ -70,19 +70,20 @@ impl Worker {
         );
     }
 
-    /// Starts a background cloud lookup for `reading` (empty cancels) and
-    /// reports whether cloud conversion is enabled.
-    pub fn queue_cloud(&self, reading: String) -> bool {
+    /// Starts the background lookups for `reading`, including the cloud's
+    /// if `cloud` allows it, and reports whether cloud conversion is enabled.
+    pub fn start_lookup(&self, reading: String, cloud: bool) -> bool {
         matches!(
-            Self::request(&Request::QueueCloud { reading }, REQUEST_TIMEOUT),
+            Self::request(&Request::StartLookup { reading, cloud }, REQUEST_TIMEOUT),
             Ok(Response::CloudEnabled(true))
         )
     }
 
-    /// The finished cloud result for `reading`. Never performs HTTP itself.
-    pub fn poll_cloud(&self, reading: String) -> Option<Vec<CloudCandidate>> {
-        match Self::request(&Request::PollCloud { reading }, POLL_TIMEOUT) {
-            Ok(Response::CloudCandidates(candidates)) => Some(candidates),
+    /// What the lookups for `reading` found so far. The worker answers from
+    /// finished results and never converts or performs HTTP for this.
+    pub fn poll_lookup(&self, reading: String) -> Option<Lookup> {
+        match Self::request(&Request::PollLookup { reading }, POLL_TIMEOUT) {
+            Ok(Response::Lookup(lookup)) => Some(lookup),
             _ => None,
         }
     }

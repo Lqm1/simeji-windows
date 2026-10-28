@@ -1,12 +1,13 @@
 //! The conversion worker process.
 //!
 //! The TSF DLL runs inside every application that receives text, so it keeps
-//! no engine state. This process owns the [`simeji_engine::Engine`] and the
-//! optional cloud lookups, and answers [`simeji_protocol::Request`]s on the
-//! user's [`simeji_protocol::WORKER_PIPE`].
+//! no engine state. This process owns the [`simeji_engine::Engine`], the
+//! background lookups for the reading being typed, and answers
+//! [`simeji_protocol::Request`]s on the user's [`simeji_protocol::WORKER_PIPE`].
 
 pub mod cloud;
 pub mod server;
+pub mod suggestions;
 pub mod user_data;
 
 use std::path::PathBuf;

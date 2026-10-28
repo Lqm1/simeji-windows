@@ -1,20 +1,19 @@
 use simeji_protocol::{Request, Response};
 use simeji_worker::{
-    cloud::CloudQueue,
-    server::{dispatch, open_engine},
+    server::{Lookups, dispatch, open_engine},
     user_data::UserData,
 };
 use std::path::Path;
 
 #[test]
-fn answers_each_request_with_the_engine_and_cloud_queue() {
+fn answers_each_request_with_the_engine_and_lookups() {
     let user_data = UserData::at(
         std::env::temp_dir().join(format!("simeji-dispatch-test-{}", std::process::id())),
     );
     let dictionary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/dictionary");
     let mut engine = open_engine(&dictionary, &user_data).unwrap();
-    let cloud = CloudQueue::new(&user_data);
-    let mut ask = |request| dispatch(&mut engine, &cloud, request).unwrap();
+    let lookups = Lookups::new(&dictionary, &user_data);
+    let mut ask = |request| dispatch(&mut engine, &lookups, request).unwrap();
 
     assert!(matches!(ask(Request::Ping), Response::Ready));
     assert!(matches!(
@@ -30,22 +29,34 @@ fn answers_each_request_with_the_engine_and_cloud_queue() {
         Response::Candidates(candidates) if candidates.iter().any(|c| c.text == "猫")
     ));
     assert!(matches!(
-        ask(Request::QueueCloud {
-            reading: "ねこ".into()
+        ask(Request::StartLookup {
+            reading: "ねこ".into(),
+            cloud: true,
         }),
         Response::CloudEnabled(false)
     ));
-    assert!(matches!(
-        ask(Request::PollCloud { reading: "ねこ".into() }),
-        Response::CloudCandidates(candidates) if candidates.is_empty()
-    ));
+    let start = std::time::Instant::now();
+    let conversion = loop {
+        let Response::Lookup(lookup) = ask(Request::PollLookup {
+            reading: "ねこ".into(),
+        }) else {
+            panic!("expected a lookup");
+        };
+        assert_eq!(lookup.cloud, None);
+        if let Some(conversion) = lookup.conversion {
+            break conversion;
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(20));
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert_eq!(conversion.candidates[0].text, "猫");
     let invalid = Request::ConvertSentence {
         reading: "a\0b".into(),
     };
-    assert!(dispatch(&mut engine, &cloud, invalid).is_err());
+    assert!(dispatch(&mut engine, &lookups, invalid).is_err());
     assert!(!engine.is_faulted());
 
-    drop(cloud);
+    drop(lookups);
     drop(engine);
     std::fs::remove_dir_all(user_data.root()).unwrap();
 }

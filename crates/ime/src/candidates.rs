@@ -102,6 +102,10 @@ impl CandidateList {
         self.choices.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.choices.len()
+    }
+
     pub fn clear(&mut self) {
         self.choices.clear();
         self.selected = 0;

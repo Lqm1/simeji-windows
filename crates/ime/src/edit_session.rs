@@ -7,7 +7,7 @@ use crate::{
     input_scope,
     text_service::Shared,
 };
-use std::{mem::ManuallyDrop, rc::Rc};
+use std::{mem::ManuallyDrop, ops::Range, rc::Rc};
 use windows::{
     Win32::{
         Foundation::*,
@@ -79,6 +79,27 @@ impl EditSession {
         Ok(Some(composition))
     }
 
+    /// The part of `range` from `focus.start` to `focus.end`, in UTF-16 units.
+    fn subrange(
+        cookie: u32,
+        range: &ITfRange,
+        focus: &Range<usize>,
+        length: usize,
+    ) -> Result<ITfRange> {
+        unsafe {
+            let part = range.Clone()?;
+            let mut shifted = 0;
+            part.ShiftStart(cookie, focus.start as i32, &mut shifted, std::ptr::null())?;
+            part.ShiftEnd(
+                cookie,
+                focus.end as i32 - length as i32,
+                &mut shifted,
+                std::ptr::null(),
+            )?;
+            Ok(part)
+        }
+    }
+
     fn underline(
         &self,
         cookie: u32,
@@ -96,15 +117,7 @@ impl EditSession {
             attributes.SetValue(cookie, range, &atom(attribute))?;
             if let Some(focus) = &view.focus {
                 let length = view.text.encode_utf16().count();
-                let focused = range.Clone()?;
-                let mut shifted = 0;
-                focused.ShiftStart(cookie, focus.start as i32, &mut shifted, std::ptr::null())?;
-                focused.ShiftEnd(
-                    cookie,
-                    focus.end as i32 - length as i32,
-                    &mut shifted,
-                    std::ptr::null(),
-                )?;
+                let focused = Self::subrange(cookie, range, focus, length)?;
                 attributes.SetValue(cookie, &focused, &atom(Attribute::Focused))?;
             }
         }
@@ -139,32 +152,30 @@ impl EditSession {
         }
     }
 
-    /// Places the candidate window under the composition unless the
-    /// application draws the candidates. It is left as it is when the
-    /// application cannot report where the text is.
+    /// Shows the candidates under the composition, or under the focused
+    /// clause while converting, unless the application draws them. When the
+    /// application cannot report where the text is, the window stays where
+    /// it was.
     fn show_candidates(&self, cookie: u32, range: &ITfRange, view: &CompositionView) -> Result<()> {
-        unsafe {
+        let anchor = (|| unsafe {
             let active = self.context.GetActiveView()?;
+            let measured = match &view.focus {
+                Some(focus) if view.candidates.is_some() => {
+                    Self::subrange(cookie, range, focus, view.text.encode_utf16().count())?
+                }
+                _ => range.clone(),
+            };
             let mut rect = RECT::default();
             let mut clipped = BOOL::default();
-            if active
-                .GetTextExt(cookie, range, &mut rect, &mut clipped)
-                .is_err()
-            {
-                return Ok(());
-            }
+            active.GetTextExt(cookie, &measured, &mut rect, &mut clipped)?;
             let parent = active.GetWnd().unwrap_or_else(|_| GetFocus());
-            let mut document = self.shared.document.borrow_mut();
-            match &view.candidates {
-                Some(candidates) if !document.application_draws_candidates => {
-                    document.candidate_window.show(parent, rect, candidates)
-                }
-                _ => {
-                    document.candidate_window.hide();
-                    Ok(())
-                }
-            }
+            Ok::<_, Error>((parent, rect))
+        })();
+        let mut document = self.shared.document.borrow_mut();
+        if let Ok((parent, rect)) = anchor {
+            document.candidate_window.set_anchor(parent, rect);
         }
+        document.show_candidates(view.candidates.as_ref())
     }
 }
 

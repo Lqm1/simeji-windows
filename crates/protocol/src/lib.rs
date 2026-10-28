@@ -43,6 +43,17 @@ pub struct CloudCandidate {
     pub scene: String,
 }
 
+/// Background results for the reading being typed; each part is `None`
+/// while it is pending.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Lookup {
+    /// The engine's conversion of the reading.
+    pub conversion: Option<Conversion>,
+    /// Alternatives for the first clause of `conversion`.
+    pub first_clause: Option<Vec<Candidate>>,
+    pub cloud: Option<Vec<CloudCandidate>>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     /// Answered with [`Response::Ready`].
@@ -62,12 +73,12 @@ pub enum Request {
     },
     /// Answered with [`Response::Done`].
     AddWord { reading: String, text: String },
-    /// Starts a background cloud lookup; an empty reading cancels it.
-    /// Answered with [`Response::CloudEnabled`].
-    QueueCloud { reading: String },
-    /// The finished cloud lookup, empty while pending.
-    /// Answered with [`Response::CloudCandidates`].
-    PollCloud { reading: String },
+    /// Starts background lookups for the reading being typed: the engine's
+    /// conversion and, if `cloud` allows it, the cloud's. An empty reading
+    /// cancels them. Answered with [`Response::CloudEnabled`].
+    StartLookup { reading: String, cloud: bool },
+    /// Answered with [`Response::Lookup`].
+    PollLookup { reading: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -78,6 +89,6 @@ pub enum Response {
     Conversion(Conversion),
     Candidates(Vec<Candidate>),
     CloudEnabled(bool),
-    CloudCandidates(Vec<CloudCandidate>),
+    Lookup(Lookup),
     Error(String),
 }
