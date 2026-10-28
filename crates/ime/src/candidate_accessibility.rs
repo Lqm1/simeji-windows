@@ -88,7 +88,6 @@ impl CandidateList_Impl {
         .into())
     }
 
-    /// The provider of the selected item, for the selection event.
     pub fn selected_item(&self) -> Result<IRawElementProviderSimple> {
         let selected = self.list.borrow().selected;
         self.item(selected)?.cast()

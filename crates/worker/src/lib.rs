@@ -13,7 +13,6 @@ use std::path::PathBuf;
 
 const DICTIONARY_DIRECTORY: &str = "Dictionary";
 
-/// The dictionaries installed next to the worker executable.
 pub fn installed_dictionary() -> std::io::Result<PathBuf> {
     let executable = std::env::current_exe()?;
     let directory = executable

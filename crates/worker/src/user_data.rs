@@ -21,7 +21,6 @@ pub struct UserData {
 }
 
 impl UserData {
-    /// The signed-in user's data directory.
     pub fn locate() -> Option<Self> {
         std::env::var_os("LOCALAPPDATA")
             .map(|local| Self::at(Path::new(&local).join(PRODUCT_DIRECTORY)))

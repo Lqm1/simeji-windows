@@ -60,7 +60,6 @@ struct WindowData {
 pub(crate) struct CandidateWindow {
     window: Option<HWND>,
     data: Rc<WindowData>,
-    /// The DPI the font was made for.
     font_dpi: u32,
     visible: bool,
 }
@@ -228,7 +227,6 @@ impl CandidateWindow {
         }
     }
 
-    /// Shows `page` below `composition`, creating the window on first use.
     pub fn show(&mut self, parent: HWND, composition: RECT, view: &CandidateView) -> Result<()> {
         let window = match self.window {
             Some(window) => window,
@@ -290,8 +288,6 @@ impl CandidateWindow {
         FONT_POINTS * dpi as i32 / POINTS_PER_INCH
     }
 
-    /// The candidates of the page as shown: at most [`MAX_CHARACTERS`]
-    /// long, without control characters.
     fn visible_items(view: &CandidateView) -> Vec<String> {
         view.page()
             .iter()
@@ -304,7 +300,6 @@ impl CandidateWindow {
             .collect()
     }
 
-    /// The position among all candidates when they span several pages.
     fn footer(view: &CandidateView) -> Option<String> {
         (view.texts.len() > PAGE_SIZE)
             .then(|| format!("{}/{}", view.selected + 1, view.texts.len()))
@@ -364,7 +359,6 @@ impl CandidateWindow {
         }
     }
 
-    /// A topmost window owned by `parent` that never takes focus.
     fn create(&self, parent: HWND) -> Result<HWND> {
         register_class()?;
         let data = Rc::into_raw(self.data.clone());

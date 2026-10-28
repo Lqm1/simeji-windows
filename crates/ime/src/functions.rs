@@ -17,10 +17,7 @@ use windows::{
     core::*,
 };
 
-/// The conversions search needs from the worker.
 pub(crate) trait SearchConverter {
-    /// All candidates for a reading that converts as one word, or else the
-    /// converted sentence.
     fn search_candidates(
         &mut self,
         reading: &str,
@@ -116,8 +113,6 @@ impl ITfFnGetPreferredTouchKeyboardLayout_Impl for Functions_Impl {
 }
 
 impl ITfFnSearchCandidateProvider_Impl for Functions_Impl {
-    /// A failed conversion gives no candidates rather than failing the
-    /// search.
     fn GetSearchCandidates(&self, query: &BSTR, _application: &BSTR) -> Result<ITfCandidateList> {
         let query = query.to_string();
         let candidates = if query.is_empty() {

@@ -15,7 +15,6 @@ pub(crate) struct Choice {
     pub whole_sentence: bool,
 }
 
-/// All candidates and the selected one, shown a page at a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CandidateView {
     pub texts: Vec<String>,
@@ -108,7 +107,6 @@ impl CandidateList {
         self.choices.get(self.selected)
     }
 
-    /// Moves the selection by `step`, wrapping around at both ends.
     pub fn move_selection(&mut self, step: isize) -> Option<&Choice> {
         let count = self.choices.len() as isize;
         if count == 0 {
@@ -118,7 +116,6 @@ impl CandidateList {
         self.selected()
     }
 
-    /// Moves by `step` pages, wrapping around, at the same place on the page.
     pub fn move_page(&mut self, step: isize) -> Option<&Choice> {
         let count = self.choices.len();
         if count == 0 {

@@ -139,8 +139,6 @@ impl ITfCandidateListUIElement_Impl for CandidateElement_Impl {
             .ok_or_else(|| E_INVALIDARG.into())
     }
 
-    /// Writes the first candidate index of each page, as many as `size`
-    /// allows, and the page count.
     fn GetPageIndex(&self, starts: *mut u32, size: u32, page_count: *mut u32) -> Result<()> {
         if page_count.is_null() {
             return Err(E_INVALIDARG.into());

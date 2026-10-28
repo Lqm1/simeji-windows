@@ -21,7 +21,6 @@ thread_local! {
     static TIMERS: RefCell<BTreeMap<usize, Weak<Shared>>> = const { RefCell::new(BTreeMap::new()) };
 }
 
-/// Stops polling when dropped.
 pub(crate) struct CloudTimer(usize);
 
 impl CloudTimer {

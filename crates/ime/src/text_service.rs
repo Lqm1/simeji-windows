@@ -41,8 +41,6 @@ pub(crate) struct Document {
     /// as last read by an edit session.
     pub public_field: bool,
     pub candidate_window: CandidateWindow,
-    /// Whether the application draws the candidates from the UI element
-    /// and keeps the candidate window hidden.
     pub application_draws_candidates: bool,
 }
 
@@ -64,7 +62,6 @@ struct InputModeState {
     shown: bool,
 }
 
-/// The candidate list element the application was told about.
 struct CandidateElementState {
     element: ComObject<CandidateElement>,
     id: u32,
@@ -224,8 +221,8 @@ impl TextService_Impl {
         }
     }
 
-    /// Offers the function provider for the touch keyboard and search. The
-    /// IME works without it, so a failure does not fail the activation.
+    /// The IME works without the function provider, so a failure does not
+    /// fail the activation.
     fn advise_functions(thread: &ITfThreadMgr, client_id: u32) {
         let functions: ITfFunctionProvider = Functions::new().into();
         if let Ok(source) = thread.cast::<ITfSourceSingle>() {
@@ -243,8 +240,6 @@ impl TextService_Impl {
         }
     }
 
-    /// Tells the application about the candidates through the UI element,
-    /// so that an application that draws them itself can hide the window.
     fn present_candidates(&self, context: &ITfContext, view: Option<&CandidateView>) {
         let Some(view) = view else {
             self.end_candidate_element();
@@ -289,7 +284,7 @@ impl TextService_Impl {
         *self.candidate_element.borrow_mut() = Some(CandidateElementState { element, id });
     }
 
-    /// Lets the element reach this service without keeping it alive.
+    /// The service owns the element, so the element holds it weakly.
     fn element_handler(&self) -> Handler {
         let service = self.to_interface::<ITfKeyEventSink>().downgrade().ok();
         Box::new(move |request| {
