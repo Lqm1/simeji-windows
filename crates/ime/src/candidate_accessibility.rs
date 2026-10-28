@@ -25,9 +25,12 @@ const LIST_NAME: &str = "変換候補";
 #[derive(Debug, Default)]
 pub(crate) struct ListState {
     pub items: Vec<String>,
+    pub cloud: Vec<bool>,
     pub selected: usize,
     pub row_height: i32,
     pub padding: i32,
+
+    pub selecting: bool,
 }
 
 pub(crate) type SharedList = Rc<RefCell<ListState>>;
@@ -177,6 +180,9 @@ impl IRawElementProviderFragmentRoot_Impl for CandidateList_Impl {
 
 impl ISelectionProvider_Impl for CandidateList_Impl {
     fn GetSelection(&self) -> Result<*mut SAFEARRAY> {
+        if !self.list.borrow().selecting {
+            return Ok(unsafe { SafeArrayCreateVector(VT_UNKNOWN, 0, 0) });
+        }
         let selected = self.selected_item()?;
         unsafe {
             let array = SafeArrayCreateVector(VT_UNKNOWN, 0, 1);
@@ -194,7 +200,7 @@ impl ISelectionProvider_Impl for CandidateList_Impl {
     }
 
     fn IsSelectionRequired(&self) -> Result<BOOL> {
-        Ok(true.into())
+        Ok(false.into())
     }
 }
 
@@ -243,12 +249,22 @@ impl IRawElementProviderSimple_Impl for CandidateItem_Impl {
     fn GetPropertyValue(&self, property: UIA_PROPERTY_ID) -> Result<VARIANT> {
         let list = self.list.borrow();
         Ok(match property {
-            UIA_NamePropertyId => list
-                .items
-                .get(self.index)
-                .map_or_else(VARIANT::default, |item| VARIANT::from(BSTR::from(item))),
+            UIA_NamePropertyId => {
+                list.items
+                    .get(self.index)
+                    .map_or_else(VARIANT::default, |item| {
+                        let name = if list.cloud.get(self.index) == Some(&true) {
+                            format!("{item}、クラウド候補")
+                        } else {
+                            item.clone()
+                        };
+                        VARIANT::from(BSTR::from(name))
+                    })
+            }
             UIA_ControlTypePropertyId => VARIANT::from(UIA_ListItemControlTypeId.0),
-            UIA_SelectionItemIsSelectedPropertyId => VARIANT::from(list.selected == self.index),
+            UIA_SelectionItemIsSelectedPropertyId => {
+                VARIANT::from(list.selecting && list.selected == self.index)
+            }
             _ => VARIANT::default(),
         })
     }
@@ -324,7 +340,8 @@ impl ISelectionItemProvider_Impl for CandidateItem_Impl {
     }
 
     fn IsSelected(&self) -> Result<BOOL> {
-        Ok((self.list.borrow().selected == self.index).into())
+        let list = self.list.borrow();
+        Ok((list.selecting && list.selected == self.index).into())
     }
 
     fn SelectionContainer(&self) -> Result<IRawElementProviderSimple> {

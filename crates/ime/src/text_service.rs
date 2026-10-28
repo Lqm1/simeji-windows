@@ -13,7 +13,7 @@ use crate::{
     functions::Functions,
     input_mode::{self, InputModeButton},
     keys::{self, Key, Modifiers},
-    worker::Worker,
+    worker::{Converter, Worker},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -350,7 +350,32 @@ impl TextService_Impl {
         match effect {
             Effect::Show(view) => {
                 self.present_candidates(context, view.candidates.as_ref());
-                self.request_edit(context, Edit::Show(view))
+                self.request_edit(context, Edit::Show(view))?;
+                let reading = self.shared.composer.borrow().suggestion_reading();
+                if let Some(reading) = reading {
+                    // Reuse the existing engine API. Prediction scheduling and
+                    // conversion performance are separate work from this UI.
+                    if let Ok(result) = Worker.convert_sentence(&reading) {
+                        let mut candidates = result.candidates;
+                        if candidates.is_empty() {
+                            candidates.push(simeji_protocol::Candidate {
+                                text: reading.clone(),
+                                reading: reading.clone(),
+                                property: 0,
+                                left_id: 0,
+                                right_id: 0,
+                            });
+                        }
+                        self.shared
+                            .composer
+                            .borrow_mut()
+                            .receive_local_candidates(&reading, candidates);
+                        let view = self.shared.composer.borrow().view();
+                        self.present_candidates(context, view.candidates.as_ref());
+                        self.request_edit(context, Edit::Show(view))?;
+                    }
+                }
+                Ok(())
             }
             Effect::Commit { text, learn } => {
                 self.end_candidate_element();
@@ -455,7 +480,26 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
         *self.thread_manager.borrow_mut() = Some(thread.clone());
         *self.ui_elements.borrow_mut() = thread.cast().ok();
         Self::advise_functions(thread, client);
-        *self.cloud_timer.borrow_mut() = CloudTimer::start(&self.shared);
+        let handler = self.element_handler();
+        self.shared
+            .document
+            .borrow_mut()
+            .candidate_window
+            .set_action(Rc::new(move |action| {
+                let _ = handler(Request::Act(action));
+            }));
+        let service = self.to_interface::<ITfKeyEventSink>().downgrade().ok();
+        *self.cloud_timer.borrow_mut() = CloudTimer::start(
+            &self.shared,
+            Box::new(move || {
+                if let Some(service) = service.as_ref().and_then(Weak::upgrade)
+                    && let Ok(service) = ComObject::<TextService>::cast_from(&service)
+                    && let Some(context) = service.composition_context()
+                {
+                    let _ = service.apply_effects(&context);
+                }
+            }),
+        );
         self.activate_input_mode(thread, client)
     }
 }
@@ -608,6 +652,8 @@ mod tests {
                 let view = CandidateView {
                     texts: vec!["今日".into(), "京".into()],
                     selected: 0,
+                    cloud: Vec::new(),
+                    selecting: true,
                 };
                 service.present_candidates(&context, Some(&view));
                 let id = service.candidate_element.borrow().as_ref().unwrap().id;

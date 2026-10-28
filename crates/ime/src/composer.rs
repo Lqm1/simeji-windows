@@ -53,6 +53,7 @@ pub(crate) enum Effect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CandidateAction {
     Select(usize),
+    Page(isize),
     /// Commits the composition as shown.
     Commit,
     /// Closes the candidates and returns to the reading.
@@ -114,6 +115,9 @@ pub(crate) struct Composer {
     conversion: Option<Conversion>,
     cloud_enabled: bool,
     cloud_candidates: Vec<CloudCandidate>,
+    suggestions: CandidateList,
+    suggestions_reading: Option<String>,
+    selecting_suggestion: bool,
     effects: Vec<Effect>,
 }
 
@@ -145,6 +149,9 @@ impl Composer {
             conversion: None,
             cloud_enabled: false,
             cloud_candidates: Vec::new(),
+            suggestions: CandidateList::default(),
+            suggestions_reading: None,
+            selecting_suggestion: false,
             effects: Vec::new(),
         }
     }
@@ -202,6 +209,28 @@ impl Composer {
         typed: impl FnOnce() -> Option<String>,
         converter: &mut impl Converter,
     ) -> Result<bool, WorkerError> {
+        if self.selecting_suggestion {
+            match key {
+                Key::Escape | Key::Backspace | Key::Delete => {
+                    self.selecting_suggestion = false;
+                    self.show();
+                    return Ok(true);
+                }
+                Key::Printable {
+                    candidate_number: Some(number),
+                } => {
+                    if self.suggestions.select_number(number).is_some() {
+                        self.commit();
+                    }
+                    return Ok(true);
+                }
+                Key::Printable { .. } => {
+                    self.commit();
+                    return self.type_text(typed, converter);
+                }
+                _ => {}
+            }
+        }
         match key {
             Key::Printable { .. } => return self.type_text(typed, converter),
             Key::Enter => self.commit(),
@@ -212,9 +241,13 @@ impl Composer {
             Key::Left { .. } => self.move_caret_left(),
             Key::Right { .. } => self.move_caret_right(),
             Key::Home => self.move_caret_home(),
-            Key::End | Key::Down { .. } => self.move_caret_end(),
+            Key::End => self.move_caret_end(),
+            Key::Tab { shift } | Key::Down { shift } => {
+                self.choose_suggestion(if shift { -1 } else { 1 })
+            }
+            Key::Up { .. } => self.choose_suggestion(-1),
             Key::NextCandidatePage | Key::PreviousCandidatePage => self.convert(converter)?,
-            Key::Up { .. } | Key::ToggleInputMode => {}
+            Key::ToggleInputMode => {}
         }
         Ok(true)
     }
@@ -239,10 +272,12 @@ impl Composer {
             }
             Key::Enter => self.commit(),
             Key::Escape | Key::Backspace | Key::Delete => self.leave_conversion(),
-            Key::Space { shift: false } | Key::Down { shift: false } => {
+            Key::Space { shift: false }
+            | Key::Down { shift: false }
+            | Key::Tab { shift: false } => {
                 self.move_selection(1, converter)?;
             }
-            Key::Space { shift: true } | Key::Up { shift: false } => {
+            Key::Space { shift: true } | Key::Up { shift: false } | Key::Tab { shift: true } => {
                 self.move_selection(-1, converter)?;
             }
             Key::Down { shift: true } | Key::NextCandidatePage => self.move_page(1, converter)?,
@@ -277,7 +312,37 @@ impl Composer {
     }
 
     pub fn act(&mut self, action: CandidateAction) {
+        if !self.is_converting() {
+            match action {
+                CandidateAction::Select(index) => {
+                    if self.suggestions.select(index).is_some() {
+                        self.selecting_suggestion = true;
+                        self.show();
+                    }
+                }
+                CandidateAction::Page(step) => {
+                    if self.suggestions.move_page(step).is_some() {
+                        self.selecting_suggestion = true;
+                        self.show();
+                    }
+                }
+                CandidateAction::Commit if self.is_composing() => self.commit(),
+                CandidateAction::Cancel if self.selecting_suggestion => {
+                    self.selecting_suggestion = false;
+                    self.show();
+                }
+                _ => {}
+            }
+            return;
+        }
         match action {
+            CandidateAction::Page(step) => {
+                if let Some(conversion) = self.conversion.as_mut() {
+                    conversion.candidates.move_page(step);
+                }
+                self.apply_selection();
+                self.show();
+            }
             CandidateAction::Select(index) => {
                 let selected = self
                     .conversion
@@ -305,10 +370,19 @@ impl Composer {
         self.right.clear();
         self.conversion = None;
         self.cloud_candidates.clear();
+        self.suggestions.clear();
+        self.suggestions_reading = None;
+        self.selecting_suggestion = false;
     }
 
     /// The text a commit would insert.
     pub fn text(&self) -> String {
+        if !self.is_converting()
+            && self.selecting_suggestion
+            && let Some(choice) = self.suggestions.selected()
+        {
+            return choice.candidate.text.clone();
+        }
         match &self.conversion {
             Some(conversion) => conversion.cloud_sentence.clone().unwrap_or_else(|| {
                 conversion
@@ -326,24 +400,69 @@ impl Composer {
     }
 
     pub fn discard_cloud_candidates(&mut self) {
+        self.selecting_suggestion = false;
         self.cloud_candidates.clear();
+        self.suggestions.clear();
+        self.suggestions_reading = None;
     }
 
     /// The reading to poll for while cloud conversion is on, the user is
-    /// typing, has not converted yet and no result has arrived.
+    /// composing and no result has arrived.
     pub fn cloud_lookup_reading(&self) -> Option<String> {
-        (self.cloud_enabled
-            && self.is_composing()
-            && !self.is_converting()
-            && self.cloud_candidates.is_empty())
-        .then(|| self.reading())
+        (self.cloud_enabled && self.is_composing() && self.cloud_candidates.is_empty())
+            .then(|| self.reading())
     }
 
-    /// Keeps cloud results that are still for the current, unconverted reading.
+    /// Adds results only while they still match the current reading.
     pub fn receive_cloud_candidates(&mut self, reading: &str, candidates: Vec<CloudCandidate>) {
-        if self.reading() == reading && !self.is_converting() {
+        if self.cloud_enabled
+            && self.reading() == reading
+            && !candidates.is_empty()
+            && self.cloud_candidates != candidates
+        {
             self.cloud_candidates = candidates;
+            self.suggestions
+                .append_cloud(&self.cloud_candidates, reading);
+            if let Some(conversion) = self.conversion.as_mut() {
+                conversion
+                    .candidates
+                    .append_cloud(&self.cloud_candidates, reading);
+            }
+            self.show();
         }
+    }
+
+    pub fn suggestion_reading(&self) -> Option<String> {
+        let reading = self.reading();
+        (!self.is_converting()
+            && self.is_composing()
+            && self.suggestions_reading.as_deref() != Some(reading.as_str()))
+        .then_some(reading)
+    }
+
+    pub fn receive_local_candidates(&mut self, reading: &str, candidates: Vec<Candidate>) {
+        if self.is_converting() || !self.is_composing() || self.reading() != reading {
+            return;
+        }
+        self.suggestions = CandidateList::new(candidates, &[], reading, "");
+        self.suggestions
+            .append_cloud(&self.cloud_candidates, reading);
+        self.suggestions_reading = Some(reading.to_owned());
+    }
+
+    fn choose_suggestion(&mut self, step: isize) {
+        if self.suggestions.is_empty() {
+            if step > 0 {
+                self.move_caret_end();
+            }
+            return;
+        }
+        if self.selecting_suggestion {
+            self.suggestions.move_selection(step);
+        } else {
+            self.selecting_suggestion = true;
+        }
+        self.show();
     }
 
     fn type_text(
@@ -371,6 +490,9 @@ impl Composer {
             return;
         }
         self.cloud_candidates.clear();
+        self.suggestions.clear();
+        self.suggestions_reading = None;
+        self.selecting_suggestion = false;
         self.show();
         self.effects.push(Effect::QueueCloud(self.reading()));
     }
@@ -380,6 +502,7 @@ impl Composer {
         let finished = finish_romaji(&self.left);
         let changed = finished != self.left;
         self.left = finished;
+        self.selecting_suggestion = false;
         self.input.clone_from(&self.left);
         if changed {
             self.cloud_candidates.clear();
@@ -435,9 +558,9 @@ impl Composer {
         self.show();
     }
 
-    /// Converts the reading. The candidate window opens only when the user
-    /// asks for another candidate.
+    /// Converts the reading and opens alternatives on the first Space.
     fn convert(&mut self, converter: &mut impl Converter) -> Result<(), WorkerError> {
+        self.selecting_suggestion = false;
         let reading = format!("{}{}", finish_romaji(&self.left), self.right);
         let conversion = converter.convert_sentence(&reading)?;
         if reading != self.reading() {
@@ -463,6 +586,7 @@ impl Composer {
                 sentence: conversion.candidates.into_iter().next(),
             });
         }
+        self.open_candidates(converter)?;
         self.show();
         Ok(())
     }
@@ -634,6 +758,18 @@ impl Composer {
     /// chosen candidate of the clause before it, or else the converted
     /// sentence. A cloud sentence is not learned.
     fn learning(&self) -> Vec<Learning> {
+        if !self.is_converting() && self.selecting_suggestion {
+            return self
+                .suggestions
+                .selected()
+                .filter(|choice| !choice.whole_sentence)
+                .map(|choice| Learning {
+                    candidate: choice.candidate.clone(),
+                    previous: None,
+                })
+                .into_iter()
+                .collect();
+        }
         let Some(conversion) = &self.conversion else {
             return Vec::new();
         };
@@ -687,11 +823,22 @@ impl Composer {
     pub fn view(&self) -> CompositionView {
         let Some(conversion) = &self.conversion else {
             return CompositionView {
-                text: self.reading(),
+                text: if self.selecting_suggestion {
+                    self.text()
+                } else {
+                    self.reading()
+                },
                 converted: false,
                 focus: None,
-                caret: utf16_length(&self.left),
-                candidates: None,
+                caret: if self.selecting_suggestion {
+                    utf16_length(&self.text())
+                } else {
+                    utf16_length(&self.left)
+                },
+                candidates: self.suggestions.view().map(|mut view| {
+                    view.selecting = self.selecting_suggestion;
+                    view
+                }),
             };
         };
         let text = self.text();
@@ -713,6 +860,93 @@ impl Composer {
 mod tests {
     use super::*;
     use simeji_protocol::{Clause as SentenceClause, Conversion as SentenceConversion};
+
+    #[test]
+    fn typing_suggestions_keep_the_reading_until_tab_and_learn_only_the_chosen_local_candidate() {
+        let (mut composer, mut converter) = (Composer::new(), Fake::new());
+        type_text(&mut composer, &mut converter, "kyou");
+        composer.take_effects();
+        composer.receive_local_candidates(
+            "kyou",
+            vec![candidate("今日", "kyou"), candidate("京", "kyou")],
+        );
+        let view = composer.view();
+        assert_eq!(view.text, "kyou");
+        assert!(!view.candidates.unwrap().selecting);
+        press(&mut composer, &mut converter, Key::Tab { shift: false });
+        assert_eq!(shown(&mut composer).text, "今日");
+        press(&mut composer, &mut converter, DOWN);
+        assert_eq!(shown(&mut composer).text, "京");
+        press(&mut composer, &mut converter, Key::Enter);
+        assert_eq!(
+            composer.take_effects(),
+            [Effect::Commit {
+                text: "京".into(),
+                learn: vec![learning(candidate("京", "kyou"), None)]
+            }]
+        );
+        assert!(composer.view().candidates.is_none());
+    }
+
+    #[test]
+    fn late_cloud_results_append_without_changing_the_selection_or_committing_the_cloud_marker() {
+        let (mut composer, mut converter) = (Composer::new(), Fake::new());
+        type_text(&mut composer, &mut converter, "kyou");
+        composer.take_effects();
+        composer.receive_local_candidates(
+            "kyou",
+            vec![candidate("今日", "kyou"), candidate("京", "kyou")],
+        );
+        composer.set_cloud_enabled(true);
+        press(&mut composer, &mut converter, Key::Tab { shift: false });
+        press(&mut composer, &mut converter, DOWN);
+        composer.take_effects();
+        let cloud = CloudCandidate {
+            text: "今日は晴れ".into(),
+            reading: "kyou".into(),
+            property: 0,
+            kind: 0,
+            scene: String::new(),
+        };
+        composer.receive_cloud_candidates("kyou", vec![cloud.clone()]);
+        let view = shown(&mut composer);
+        assert_eq!(view.text, "京");
+        let candidates = view.candidates.unwrap();
+        assert_eq!(candidates.texts, ["今日", "京", "今日は晴れ"]);
+        assert_eq!(candidates.cloud, [false, false, true]);
+        assert_eq!(candidates.selected, 1);
+        composer.receive_cloud_candidates("stale", vec![cloud]);
+        assert!(composer.take_effects().is_empty());
+        composer.act(CandidateAction::Select(2));
+        composer.take_effects();
+        composer.act(CandidateAction::Commit);
+        assert_eq!(
+            composer.take_effects(),
+            [Effect::Commit {
+                text: "今日は晴れ".into(),
+                learn: vec![]
+            }]
+        );
+    }
+
+    #[test]
+    fn editing_or_cancelling_predictions_discards_stale_candidates() {
+        let (mut composer, mut converter) = (Composer::new(), Fake::new());
+        type_text(&mut composer, &mut converter, "kyou");
+        composer.take_effects();
+        composer.receive_local_candidates("kyou", vec![candidate("今日", "kyou")]);
+        press(&mut composer, &mut converter, DOWN);
+        composer.take_effects();
+        press(&mut composer, &mut converter, Key::Escape);
+        assert_eq!(shown(&mut composer).text, "kyou");
+        press(&mut composer, &mut converter, Key::Backspace);
+        composer.take_effects();
+        assert_eq!(composer.suggestion_reading().as_deref(), Some("kyo"));
+        composer.receive_local_candidates("kyou", vec![candidate("stale", "kyou")]);
+        assert!(composer.view().candidates.is_none());
+        press(&mut composer, &mut converter, Key::Escape);
+        assert!(!composer.is_composing());
+    }
 
     /// Returns romaji unchanged as the reading and the same two clauses for
     /// every reading.
@@ -822,6 +1056,8 @@ mod tests {
         Some(CandidateView {
             texts: items.iter().map(|item| (*item).into()).collect(),
             selected,
+            cloud: vec![false; items.len()],
+            selecting: true,
         })
     }
 
@@ -935,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn the_first_space_converts_without_the_candidate_window() {
+    fn the_first_space_converts_and_opens_the_candidate_window() {
         let (mut composer, mut converter) = (Composer::new(), Fake::new());
         type_text(&mut composer, &mut converter, "kyouha");
         composer.take_effects();
@@ -947,10 +1183,13 @@ mod tests {
                 converted: true,
                 focus: Some(0..2),
                 caret: 3,
-                candidates: None,
+                candidates: page(&["今日", "京", "強"], 0),
             }
         );
-        assert!(converter.candidate_requests.is_empty());
+        assert_eq!(
+            converter.candidate_requests,
+            [("kyou".into(), String::new())]
+        );
         press(&mut composer, &mut converter, Key::Enter);
         assert_eq!(
             composer.take_effects(),
@@ -962,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn the_second_space_opens_the_window_on_the_next_candidate() {
+    fn the_second_space_moves_to_the_next_candidate() {
         let (mut composer, mut converter) = converted();
         press(&mut composer, &mut converter, SPACE);
         let view = shown(&mut composer);
@@ -1017,7 +1256,11 @@ mod tests {
         assert_eq!((view.text.as_str(), view.focus), ("居右派", Some(0..1)));
         assert_eq!(
             converter.candidate_requests,
-            [("kyo".into(), String::new()), ("uha".into(), "居".into())]
+            [
+                ("kyou".into(), String::new()),
+                ("kyo".into(), String::new()),
+                ("uha".into(), "居".into())
+            ]
         );
         press(&mut composer, &mut converter, Key::Right { shift: true });
         assert_eq!(shown(&mut composer).text, "今日は");
@@ -1061,7 +1304,9 @@ mod tests {
 
     #[test]
     fn number_keys_type_digits_while_the_window_is_closed() {
-        let (mut composer, mut converter) = converted();
+        let (mut composer, mut converter) = (Composer::new(), Fake::new());
+        type_text(&mut composer, &mut converter, "a");
+        composer.take_effects();
         let key = Key::Printable {
             candidate_number: Some(1),
         };
@@ -1071,8 +1316,7 @@ mod tests {
                 .unwrap()
         );
         let effects = composer.take_effects();
-        assert!(matches!(effects[0], Effect::Commit { .. }));
-        assert_eq!(effects[1], Effect::Show(typing("1", 1)));
+        assert_eq!(effects[0], Effect::Show(typing("a1", 2)));
     }
 
     #[test]
@@ -1241,13 +1485,13 @@ mod tests {
     }
 
     #[test]
-    fn cloud_polling_waits_for_typing_and_stops_after_conversion() {
+    fn cloud_polling_continues_after_conversion_until_results_arrive() {
         let (mut composer, mut converter) = (Composer::new(), Fake::new());
         composer.set_cloud_enabled(true);
         assert_eq!(composer.cloud_lookup_reading(), None);
         type_text(&mut composer, &mut converter, "kyouha");
         press(&mut composer, &mut converter, SPACE);
-        assert_eq!(composer.cloud_lookup_reading(), None);
+        assert_eq!(composer.cloud_lookup_reading().as_deref(), Some("kyouha"));
     }
 
     #[test]

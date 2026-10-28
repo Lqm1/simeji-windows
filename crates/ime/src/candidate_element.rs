@@ -74,7 +74,7 @@ impl CandidateElement {
         if current.texts != view.texts {
             changes |= TF_CLUIE_STRING;
         }
-        if current.selected != view.selected {
+        if current.selected != view.selected || current.selecting != view.selecting {
             changes |= TF_CLUIE_SELECTION;
         }
         if current.page_start() != view.page_start() {
@@ -216,6 +216,8 @@ mod tests {
         CandidateView {
             texts: (0..count).map(|n| n.to_string()).collect(),
             selected,
+            cloud: Vec::new(),
+            selecting: true,
         }
     }
 

@@ -6,24 +6,27 @@
 use crate::{
     candidate_accessibility::{CandidateList, SharedList},
     candidates::{CandidateView, PAGE_SIZE},
+    composer::CandidateAction,
     dll,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
 use windows::{
     Win32::{
         Foundation::*,
+        Graphics::Dwm::*,
         Graphics::Gdi::*,
         System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
+        System::Registry::*,
         UI::{
             Accessibility::{
-                IRawElementProviderSimple, NotifyWinEvent, UIA_EVENT_ID, UIA_MenuClosedEventId,
-                UIA_MenuOpenedEventId, UIA_SelectionItem_ElementSelectedEventId,
-                UiaClientsAreListening, UiaRaiseAutomationEvent, UiaReturnRawElementProvider,
-                UiaRootObjectId,
+                HCF_HIGHCONTRASTON, HIGHCONTRASTW, IRawElementProviderSimple, NotifyWinEvent,
+                UIA_EVENT_ID, UIA_MenuClosedEventId, UIA_MenuOpenedEventId,
+                UIA_SelectionItem_ElementSelectedEventId, UiaClientsAreListening,
+                UiaRaiseAutomationEvent, UiaReturnRawElementProvider, UiaRootObjectId,
             },
             HiDpi::GetDpiForWindow,
             Shell::{FrameworkInputPane, IFrameworkInputPane},
@@ -34,13 +37,13 @@ use windows::{
 };
 
 const DEFAULT_DPI: i32 = 96;
-const WIDTH: i32 = 350;
-const PADDING: i32 = 5;
+const WIDTH: i32 = 260;
+const PADDING: i32 = 6;
 const GAP_TO_COMPOSITION: i32 = 2;
-const FONT_POINTS: i32 = 10;
+const FONT_POINTS: i32 = 11;
 const POINTS_PER_INCH: i32 = 72;
 /// Rows are this much taller than the font, in percent.
-const ROW_SPACING_PERCENT: i32 = 160;
+const ROW_SPACING_PERCENT: i32 = 220;
 /// Longer candidates are cut to keep the window narrow.
 const MAX_CHARACTERS: usize = 36;
 const CHILDID_SELF: i32 = 0;
@@ -51,12 +54,110 @@ fn scale(value: i32, dpi: u32) -> i32 {
     value * dpi as i32 / DEFAULT_DPI
 }
 
+type CandidateHandler = Rc<dyn Fn(CandidateAction)>;
+
 /// The data the window procedure reaches through `GWLP_USERDATA`.
 struct WindowData {
     list: SharedList,
     provider: RefCell<Option<ComObject<CandidateList>>>,
     font: RefCell<Option<HFONT>>,
     footer: RefCell<Option<String>>,
+    cloud: RefCell<Vec<bool>>,
+    page_start: Cell<usize>,
+    page_count: Cell<usize>,
+    action: RefCell<Option<CandidateHandler>>,
+    theme: Cell<Theme>,
+}
+
+#[derive(Clone, Copy)]
+struct Theme {
+    background: u32,
+    foreground: u32,
+    muted: u32,
+    selection: u32,
+    selection_text: u32,
+    border: u32,
+    accent: u32,
+}
+
+impl Theme {
+    fn read() -> Self {
+        unsafe {
+            let mut contrast = HIGHCONTRASTW {
+                cbSize: size_of::<HIGHCONTRASTW>() as u32,
+                ..Default::default()
+            };
+            let _ = SystemParametersInfoW(
+                SPI_GETHIGHCONTRAST,
+                contrast.cbSize,
+                Some((&raw mut contrast).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            );
+            if contrast.dwFlags.0 & HCF_HIGHCONTRASTON.0 != 0 {
+                return Self {
+                    background: GetSysColor(COLOR_WINDOW),
+                    foreground: GetSysColor(COLOR_WINDOWTEXT),
+                    muted: GetSysColor(COLOR_WINDOWTEXT),
+                    selection: GetSysColor(COLOR_HIGHLIGHT),
+                    selection_text: GetSysColor(COLOR_HIGHLIGHTTEXT),
+                    border: GetSysColor(COLOR_WINDOWTEXT),
+                    accent: GetSysColor(COLOR_HIGHLIGHTTEXT),
+                };
+            }
+            let mut light = 1u32;
+            let mut size = size_of::<u32>() as u32;
+            let _ = RegGetValueW(
+                HKEY_CURRENT_USER,
+                w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                w!("AppsUseLightTheme"),
+                RRF_RT_REG_DWORD,
+                None,
+                Some((&raw mut light).cast()),
+                Some(&mut size),
+            );
+            if light == 0 {
+                Self {
+                    background: 0x2b2b2b,
+                    foreground: 0xf3f3f3,
+                    muted: 0xaaaaaa,
+                    selection: 0x3b3b3b,
+                    selection_text: 0xf3f3f3,
+                    border: 0x444444,
+                    accent: 0xdda8c7,
+                }
+            } else {
+                Self {
+                    background: 0xf9f9f9,
+                    foreground: 0x1b1b1b,
+                    muted: 0x686868,
+                    selection: 0xeaeaea,
+                    selection_text: 0x1b1b1b,
+                    border: 0xdadada,
+                    accent: 0x985575,
+                }
+            }
+        }
+    }
+}
+
+fn fill(context: HDC, area: &RECT, color: u32) {
+    unsafe {
+        let brush = CreateSolidBrush(COLORREF(color));
+        FillRect(context, area, brush);
+        let _ = DeleteObject(brush.into());
+    }
+}
+
+fn label(context: HDC, text: &str, mut area: RECT, color: u32, align: DRAW_TEXT_FORMAT) {
+    unsafe {
+        SetTextColor(context, COLORREF(color));
+        DrawTextW(
+            context,
+            &mut text.encode_utf16().collect::<Vec<_>>(),
+            &mut area,
+            align | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
 }
 
 pub(crate) struct CandidateWindow {
@@ -76,6 +177,11 @@ impl Default for CandidateWindow {
                 provider: RefCell::new(None),
                 font: RefCell::new(None),
                 footer: RefCell::new(None),
+                cloud: RefCell::new(Vec::new()),
+                page_start: Cell::new(0),
+                page_count: Cell::new(0),
+                action: RefCell::new(None),
+                theme: Cell::new(Theme::read()),
             }),
             font_dpi: 0,
             visible: false,
@@ -204,6 +310,48 @@ unsafe extern "system" fn window_procedure(
                 None => DefWindowProcW(window, message, wparam, lparam),
             },
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_LBUTTONUP => {
+                if let Some(data) = data(window) {
+                    let x = (lparam.0 as u16) as i16 as i32;
+                    let y = ((lparam.0 >> 16) as u16) as i16 as i32;
+                    let action = data.action.borrow().clone();
+                    let list = data.list.borrow();
+                    let row = (y - list.padding) / list.row_height.max(1);
+                    let within_rows =
+                        y >= list.padding && row >= 0 && (row as usize) < list.items.len();
+                    let request = if within_rows {
+                        Some(CandidateAction::Select(
+                            data.page_start.get() + row as usize,
+                        ))
+                    } else if y >= list.padding + list.row_height * list.items.len() as i32
+                        && data.page_count.get() > 1
+                        && x < list.row_height * 2
+                    {
+                        Some(CandidateAction::Page(if x < list.row_height {
+                            -1
+                        } else {
+                            1
+                        }))
+                    } else {
+                        None
+                    };
+                    drop(list);
+                    if let (Some(action), Some(request)) = (action, request) {
+                        action(request);
+                        if within_rows {
+                            action(CandidateAction::Commit);
+                        }
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_SETTINGCHANGE | WM_THEMECHANGED => {
+                if let Some(data) = data(window) {
+                    data.theme.set(Theme::read());
+                    let _ = InvalidateRect(Some(window), None, false);
+                }
+                DefWindowProcW(window, message, wparam, lparam)
+            }
             _ => DefWindowProcW(window, message, wparam, lparam),
         }
     }
@@ -215,42 +363,138 @@ unsafe fn paint(window: HWND, data: &WindowData) {
         let context = BeginPaint(window, &mut paint);
         let mut client = RECT::default();
         let _ = GetClientRect(window, &mut client);
-        FillRect(context, &client, GetSysColorBrush(COLOR_WINDOW));
+        let theme = data.theme.get();
+        fill(context, &client, theme.background);
         let previous_font = data
             .font
             .borrow()
             .map(|font| SelectObject(context, font.into()));
         SetBkMode(context, TRANSPARENT);
         let list = data.list.borrow();
-        let lines = list
-            .items
-            .iter()
-            .enumerate()
-            .map(|(index, text)| (format!("{}  {text}", index + 1), index == list.selected))
-            .chain(data.footer.borrow().clone().map(|footer| (footer, false)));
-        for (row, (line, selected)) in lines.enumerate() {
-            let top = list.padding + list.row_height * row as i32;
-            let mut area = RECT {
-                left: client.left,
+        let padding = list.padding;
+        for (row, text) in list.items.iter().enumerate() {
+            let top = padding + list.row_height * row as i32;
+            let area = RECT {
+                left: padding,
                 top,
-                right: client.right,
+                right: client.right - padding,
                 bottom: top + list.row_height,
             };
-            let text_color = if selected {
-                FillRect(context, &area, GetSysColorBrush(COLOR_HIGHLIGHT));
-                COLOR_HIGHLIGHTTEXT
+            let selected = list.selecting && row == list.selected;
+            let foreground = if selected {
+                theme.selection_text
             } else {
-                COLOR_WINDOWTEXT
+                theme.foreground
             };
-            SetTextColor(context, COLORREF(GetSysColor(text_color)));
-            area.left += list.padding * 2;
-            let mut text = line.encode_utf16().collect::<Vec<_>>();
-            DrawTextW(
+            let detail = if selected {
+                theme.selection_text
+            } else {
+                theme.muted
+            };
+            if selected {
+                let brush = CreateSolidBrush(COLORREF(theme.selection));
+                let old_brush = SelectObject(context, brush.into());
+                let old_pen = SelectObject(context, GetStockObject(NULL_PEN));
+                let _ = RoundRect(
+                    context,
+                    area.left,
+                    area.top,
+                    area.right,
+                    area.bottom,
+                    padding * 2,
+                    padding * 2,
+                );
+                SelectObject(context, old_pen);
+                SelectObject(context, old_brush);
+                let _ = DeleteObject(brush.into());
+                fill(
+                    context,
+                    &RECT {
+                        left: area.left,
+                        top: top + padding,
+                        right: area.left + (padding / 2).max(2),
+                        bottom: area.bottom - padding,
+                    },
+                    theme.accent,
+                );
+            }
+            let text_left = padding * 2 + list.row_height;
+            label(
                 context,
-                &mut text,
-                &mut area,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                &(row + 1).to_string(),
+                RECT {
+                    right: text_left - padding,
+                    ..area
+                },
+                detail,
+                DT_CENTER,
             );
+            label(
+                context,
+                text,
+                RECT {
+                    left: text_left,
+                    right: area.right - list.row_height,
+                    ..area
+                },
+                foreground,
+                DT_LEFT,
+            );
+            if data.cloud.borrow().get(row) == Some(&true) {
+                label(
+                    context,
+                    "☁",
+                    RECT {
+                        left: area.right - list.row_height,
+                        ..area
+                    },
+                    detail,
+                    DT_CENTER,
+                );
+            }
+        }
+        if let Some(footer) = data.footer.borrow().as_ref() {
+            let top = padding + list.row_height * list.items.len() as i32;
+            fill(
+                context,
+                &RECT {
+                    left: 0,
+                    top,
+                    right: client.right,
+                    bottom: top + 1,
+                },
+                theme.border,
+            );
+            let area = RECT {
+                left: padding,
+                top: top + 1,
+                right: client.right - padding * 2,
+                bottom: client.bottom - padding,
+            };
+            if data.page_count.get() > 1 {
+                label(
+                    context,
+                    "▴",
+                    RECT {
+                        right: list.row_height,
+                        ..area
+                    },
+                    theme.foreground,
+                    DT_CENTER,
+                );
+                label(
+                    context,
+                    "▾",
+                    RECT {
+                        left: list.row_height,
+                        right: list.row_height * 2,
+                        ..area
+                    },
+                    theme.foreground,
+                    DT_CENTER,
+                );
+            }
+            label(context, footer, area, theme.muted, DT_RIGHT);
         }
         if let Some(previous) = previous_font {
             SelectObject(context, previous);
@@ -258,8 +502,10 @@ unsafe fn paint(window: HWND, data: &WindowData) {
         let _ = EndPaint(window, &paint);
     }
 }
-
 impl CandidateWindow {
+    pub fn set_action(&mut self, action: CandidateHandler) {
+        *self.data.action.borrow_mut() = Some(action);
+    }
     pub fn hide(&mut self) {
         if let Some(window) = self.window.filter(|_| self.visible) {
             unsafe {
@@ -288,19 +534,35 @@ impl CandidateWindow {
             .find(|dpi| *dpi > 0)
             .unwrap_or(DEFAULT_DPI as u32);
         self.use_font(dpi);
+        self.data.theme.set(Theme::read());
+        self.data.page_start.set(view.page_start());
+        self.data.page_count.set(view.page_count());
+        *self.data.cloud.borrow_mut() = (0..view.page().len())
+            .map(|row| {
+                view.cloud
+                    .get(view.page_start() + row)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .collect();
         let selection_changed = {
             let mut list = self.data.list.borrow_mut();
             let items = Self::visible_items(view);
             let selected = view.selected_on_page();
-            let changed = !self.visible || list.items != items || list.selected != selected;
+            let changed = !self.visible
+                || list.items != items
+                || list.selected != selected
+                || list.selecting != view.selecting;
             list.items = items;
             list.selected = selected;
             list.row_height = Self::row_height(dpi);
             list.padding = scale(PADDING, dpi);
+            list.selecting = view.selecting;
+            list.cloud = self.data.cloud.borrow().clone();
             changed
         };
         *self.data.footer.borrow_mut() = Self::footer(view);
-        let rows = (view.page().len() + usize::from(view.texts.len() > PAGE_SIZE)) as i32;
+        let rows = (view.page().len() + 1) as i32;
         let size = SIZE {
             cx: scale(WIDTH, dpi),
             cy: rows * Self::row_height(dpi) + 2 * scale(PADDING, dpi),
@@ -314,6 +576,27 @@ impl CandidateWindow {
             },
         };
         unsafe {
+            let rounded = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                window,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                (&raw const rounded).cast(),
+                size_of_val(&rounded) as u32,
+            );
+            let dark = BOOL::from(self.data.theme.get().background == 0x2b2b2b);
+            let _ = DwmSetWindowAttribute(
+                window,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                (&raw const dark).cast(),
+                size_of_val(&dark) as u32,
+            );
+            let border = self.data.theme.get().border;
+            let _ = DwmSetWindowAttribute(
+                window,
+                DWMWA_BORDER_COLOR,
+                (&raw const border).cast(),
+                size_of_val(&border) as u32,
+            );
             SetWindowPos(
                 window,
                 Some(HWND_TOPMOST),
@@ -335,7 +618,7 @@ impl CandidateWindow {
             self.raise_automation_event(UIA_MenuOpenedEventId);
         }
         self.visible = true;
-        if selection_changed {
+        if selection_changed && view.selecting {
             self.raise_selection_event();
         }
         Ok(())
@@ -370,8 +653,19 @@ impl CandidateWindow {
     }
 
     fn footer(view: &CandidateView) -> Option<String> {
-        (view.texts.len() > PAGE_SIZE)
-            .then(|| format!("{}/{}", view.selected + 1, view.texts.len()))
+        Some(if view.cloud.iter().any(|cloud| *cloud) {
+            format!(
+                "☁ クラウド候補  {}/{}",
+                view.page_start() / PAGE_SIZE + 1,
+                view.page_count()
+            )
+        } else {
+            format!(
+                "{}/{}",
+                view.page_start() / PAGE_SIZE + 1,
+                view.page_count()
+            )
+        })
     }
 
     fn use_font(&mut self, dpi: u32) {
@@ -485,6 +779,8 @@ mod tests {
         CandidateView {
             texts,
             selected: 10,
+            cloud: Vec::new(),
+            selecting: true,
         }
     }
 
@@ -534,12 +830,14 @@ mod tests {
             CandidateWindow::visible_items(&page),
             ["今日".to_owned(), "京 ".into(), "あ".repeat(MAX_CHARACTERS)]
         );
-        assert_eq!(CandidateWindow::footer(&page).as_deref(), Some("11/12"));
+        assert_eq!(CandidateWindow::footer(&page).as_deref(), Some("2/2"));
         let short = CandidateView {
             texts: page.page().to_vec(),
             selected: 1,
+            cloud: Vec::new(),
+            selecting: true,
         };
-        assert_eq!(CandidateWindow::footer(&short), None);
+        assert_eq!(CandidateWindow::footer(&short).as_deref(), Some("1/1"));
     }
 
     /// UI Automation must not query a window from the thread that owns it,

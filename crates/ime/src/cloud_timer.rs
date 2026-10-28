@@ -18,18 +18,31 @@ use windows::Win32::{
 const POLL_INTERVAL_MS: u32 = 150;
 
 thread_local! {
-    static TIMERS: RefCell<BTreeMap<usize, Weak<Shared>>> = const { RefCell::new(BTreeMap::new()) };
+    static TIMERS: RefCell<BTreeMap<usize, Rc<TimerState>>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+struct TimerState {
+    shared: Weak<Shared>,
+    refresh: Box<dyn Fn()>,
 }
 
 pub(crate) struct CloudTimer(usize);
 
 impl CloudTimer {
-    pub fn start(shared: &Rc<Shared>) -> Option<Self> {
+    pub fn start(shared: &Rc<Shared>, refresh: Box<dyn Fn()>) -> Option<Self> {
         let id = unsafe { SetTimer(None, 0, POLL_INTERVAL_MS, Some(poll_cloud)) };
         if id == 0 {
             return None;
         }
-        TIMERS.with(|timers| timers.borrow_mut().insert(id, Rc::downgrade(shared)));
+        TIMERS.with(|timers| {
+            timers.borrow_mut().insert(
+                id,
+                Rc::new(TimerState {
+                    shared: Rc::downgrade(shared),
+                    refresh,
+                }),
+            )
+        });
         Some(Self(id))
     }
 }
@@ -44,8 +57,10 @@ impl Drop for CloudTimer {
 }
 
 unsafe extern "system" fn poll_cloud(_window: HWND, _message: u32, id: usize, _time: u32) {
-    let Some(shared) = TIMERS.with(|timers| timers.borrow().get(&id).and_then(Weak::upgrade))
-    else {
+    let Some(timer) = TIMERS.with(|timers| timers.borrow().get(&id).cloned()) else {
+        return;
+    };
+    let Some(shared) = timer.shared.upgrade() else {
         return;
     };
     // The timer may fire while a key is being handled; skip the tick then.
@@ -72,5 +87,7 @@ unsafe extern "system" fn poll_cloud(_window: HWND, _message: u32, id: usize, _t
         && let Ok(mut composer) = shared.composer.try_borrow_mut()
     {
         composer.receive_cloud_candidates(&reading, candidates);
+        drop(composer);
+        (timer.refresh)();
     }
 }
