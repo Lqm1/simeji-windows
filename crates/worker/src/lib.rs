@@ -2,16 +2,22 @@
 //!
 //! The TSF DLL runs inside every application that receives text, so it keeps
 //! no engine state. This process owns the [`simeji_engine::Engine`] and the
-//! optional cloud lookups, and answers [`simeji_protocol::Request`]s over the
-//! owner-only pipe from [`simeji_transport`].
+//! optional cloud lookups, and answers [`simeji_protocol::Request`]s on the
+//! user's [`simeji_protocol::WORKER_PIPE`].
 
 pub mod cloud;
 pub mod server;
+pub mod user_data;
 
 use std::path::PathBuf;
 
-/// `%LOCALAPPDATA%\SimejiWindows\UserData`: learning, user dictionary and cloud settings.
-pub fn user_data_directory() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(|local| PathBuf::from(local).join("SimejiWindows").join("UserData"))
+const DICTIONARY_DIRECTORY: &str = "Dictionary";
+
+/// The dictionaries installed next to the worker executable.
+pub fn installed_dictionary() -> std::io::Result<PathBuf> {
+    let executable = std::env::current_exe()?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| std::io::Error::other("The executable has no directory"))?;
+    Ok(directory.join(DICTIONARY_DIRECTORY))
 }

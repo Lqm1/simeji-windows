@@ -1,9 +1,16 @@
-//! Local, owner-only named pipes carrying one request and one response per
-//! connection. Overlapped IO bounds every wait.
+//! Named pipes of the signed-in user's logon session, carrying one request
+//! and one response per connection. Overlapped IO bounds every wait.
+//!
+//! A pipe is named after the user's SID and session, owned by the user and
+//! open to the user's processes, including AppContainer and low integrity
+//! ones. Clients only talk to a pipe that the user owns.
+
+mod identity;
+
+use identity::User;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fs::File,
-    hash::{DefaultHasher, Hash, Hasher},
     io,
     os::windows::io::{AsRawHandle, FromRawHandle},
     time::{Duration, Instant},
@@ -15,38 +22,47 @@ use windows::{
         Storage::FileSystem::*,
         System::{IO::*, Pipes::*, Threading::*},
     },
-    core::{PCWSTR, w},
+    core::HSTRING,
 };
 
 pub const MAX_FRAME: usize = 1024 * 1024;
-const DEFAULT_CHANNEL: &str = "engine-v1";
-const MAX_CHANNEL_LENGTH: usize = 64;
+const MAX_NAME_LENGTH: usize = 64;
 /// Sent by the client after it read the response, so the server keeps the
 /// connection open until the whole response was consumed.
 const ACKNOWLEDGEMENT: u8 = 0xa5;
-const SECURITY_DESCRIPTOR: PCWSTR = w!("D:P(A;;GA;;;OW)");
 const BUSY_RETRY: Duration = Duration::from_millis(1);
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-fn pipe_name(channel: &str) -> Result<Vec<u16>> {
-    if channel.len() > MAX_CHANNEL_LENGTH
-        || !channel
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+fn path(name: &str) -> Result<HSTRING> {
+    if name.is_empty()
+        || name.len() > MAX_NAME_LENGTH
+        || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid pipe channel").into());
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Invalid pipe name").into());
     }
-    let mut hash = DefaultHasher::new();
-    std::env::var_os("USERPROFILE").hash(&mut hash);
-    Ok(format!(
-        "\\\\.\\pipe\\simeji-windows-{:016x}-{channel}\0",
-        hash.finish()
-    )
-    .encode_utf16()
-    .collect())
+    let user = User::current()?;
+    Ok(HSTRING::from(format!(
+        r"\\.\pipe\SimejiWindows\{}\{}\{name}",
+        user.sid_string, user.session
+    )))
+}
+
+/// Owner and full access for the user; read and write for the user's
+/// AppContainer processes; writable from low integrity.
+fn security_descriptor() -> Result<HSTRING> {
+    let sid = &User::current()?.sid_string;
+    Ok(HSTRING::from(format!(
+        "O:{sid}D:P(A;;GA;;;{sid})(A;;GRGW;;;AC)S:(ML;;NW;;;LW)"
+    )))
+}
+
+fn io_error(kind: io::ErrorKind, message: &str) -> Box<dyn std::error::Error + Send + Sync> {
+    io::Error::new(kind, message).into()
 }
 
 struct OwnedEvent(HANDLE);
+
 impl Drop for OwnedEvent {
     fn drop(&mut self) {
         unsafe {
@@ -58,27 +74,26 @@ impl Drop for OwnedEvent {
 pub struct Pipe {
     file: File,
 }
+
 impl Pipe {
-    pub fn server() -> Result<Self> {
-        Self::server_channel(DEFAULT_CHANNEL)
-    }
-    pub fn server_channel(channel: &str) -> Result<Self> {
-        let name = pipe_name(channel)?;
+    /// Creates the only instance of the pipe; fails if it already exists.
+    pub fn listen(name: &str) -> Result<Self> {
+        let path = path(name)?;
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         unsafe {
             ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                SECURITY_DESCRIPTOR,
+                &security_descriptor()?,
                 SDDL_REVISION_1,
                 &mut descriptor,
                 None,
             )?;
             let attributes = SECURITY_ATTRIBUTES {
-                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: descriptor.0,
                 bInheritHandle: false.into(),
             };
             let handle = CreateNamedPipeW(
-                PCWSTR(name.as_ptr()),
+                &path,
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
@@ -87,11 +102,7 @@ impl Pipe {
                 0,
                 Some(&attributes),
             );
-            let error = if handle == INVALID_HANDLE_VALUE {
-                Some(windows::core::Error::from_thread())
-            } else {
-                None
-            };
+            let error = (handle == INVALID_HANDLE_VALUE).then(windows::core::Error::from_thread);
             let _ = LocalFree(Some(HLOCAL(descriptor.0)));
             if let Some(error) = error {
                 return Err(error.into());
@@ -101,41 +112,111 @@ impl Pipe {
             })
         }
     }
-    pub fn connect(timeout: Duration) -> Result<Self> {
-        Self::connect_channel(DEFAULT_CHANNEL, timeout)
-    }
-    pub fn connect_channel(channel: &str, timeout: Duration) -> Result<Self> {
-        let name = pipe_name(channel)?;
+
+    /// Opens the pipe, waiting while another client uses it. The server may
+    /// identify but not impersonate the client.
+    pub fn connect(name: &str, timeout: Duration) -> Result<Self> {
+        let path = path(name)?;
         let end = Instant::now() + timeout;
-        loop {
-            unsafe {
-                match CreateFileW(
-                    PCWSTR(name.as_ptr()),
+        let handle = loop {
+            let opened = unsafe {
+                CreateFileW(
+                    &path,
                     GENERIC_READ.0 | GENERIC_WRITE.0,
                     FILE_SHARE_MODE(0),
                     None,
                     OPEN_EXISTING,
-                    FILE_FLAG_OVERLAPPED,
+                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
                     None,
-                ) {
-                    Ok(handle) => {
-                        return Ok(Self {
-                            file: File::from_raw_handle(handle.0),
-                        });
-                    }
-                    Err(error) => {
-                        if error.code() != ERROR_PIPE_BUSY.to_hresult() || Instant::now() >= end {
-                            return Err(error.into());
-                        }
-                    }
+                )
+            };
+            match opened {
+                Ok(handle) => break handle,
+                Err(error)
+                    if error.code() == ERROR_PIPE_BUSY.to_hresult() && Instant::now() < end =>
+                {
+                    std::thread::sleep(BUSY_RETRY);
                 }
+                Err(error) => return Err(error.into()),
             }
-            std::thread::sleep(BUSY_RETRY);
+        };
+        let pipe = Self {
+            file: unsafe { File::from_raw_handle(handle.0) },
+        };
+        if !User::current()?.owns(pipe.handle())? {
+            return Err(io_error(
+                io::ErrorKind::PermissionDenied,
+                "The pipe belongs to another user",
+            ));
         }
+        Ok(pipe)
     }
+
+    pub fn accept(&self) -> Result<()> {
+        self.overlapped(None, |overlapped| unsafe {
+            ConnectNamedPipe(self.handle(), Some(overlapped))
+        })
+        .map(|_| ())
+    }
+
+    pub fn disconnect(&self) -> Result<()> {
+        unsafe {
+            DisconnectNamedPipe(self.handle())?;
+        }
+        Ok(())
+    }
+
+    /// Serves one connection: receives a request, sends `respond(request)`
+    /// and waits for the client to acknowledge it.
+    pub fn answer<Q: DeserializeOwned, R: Serialize>(
+        &self,
+        timeout: Duration,
+        respond: impl FnOnce(Q) -> R,
+    ) -> Result<()> {
+        let request = self.receive::<Q>(timeout)?;
+        self.send(&respond(request), timeout)?;
+        if self.receive::<u8>(timeout)? != ACKNOWLEDGEMENT {
+            return Err(io_error(
+                io::ErrorKind::InvalidData,
+                "Invalid acknowledgement",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn receive<T: DeserializeOwned>(&self, timeout: Duration) -> Result<T> {
+        let deadline = Instant::now() + timeout;
+        let mut header = [0; 4];
+        self.read_exact(&mut header, deadline)?;
+        let length = u32::from_le_bytes(header) as usize;
+        if length > MAX_FRAME {
+            return Err(io_error(
+                io::ErrorKind::InvalidData,
+                "Pipe frame is too large",
+            ));
+        }
+        let mut bytes = vec![0; length];
+        self.read_exact(&mut bytes, deadline)?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub fn send<T: Serialize>(&self, value: &T, timeout: Duration) -> Result<()> {
+        let bytes = serde_json::to_vec(value)?;
+        if bytes.len() > MAX_FRAME {
+            return Err(io_error(
+                io::ErrorKind::InvalidData,
+                "Pipe frame is too large",
+            ));
+        }
+        let deadline = Instant::now() + timeout;
+        self.write_all(&(bytes.len() as u32).to_le_bytes(), deadline)?;
+        self.write_all(&bytes, deadline)
+    }
+
     fn handle(&self) -> HANDLE {
         HANDLE(self.file.as_raw_handle())
     }
+
     fn overlapped(
         &self,
         deadline: Option<Instant>,
@@ -162,32 +243,22 @@ impl Pipe {
             let mut transferred = 0;
             if waited != WAIT_OBJECT_0 {
                 let _ = CancelIoEx(self.handle(), Some(&overlapped));
-                // Drain cancellation before dropping the OVERLAPPED and buffer.
+                // The cancelled operation still writes `overlapped` and the buffer.
                 let _ = GetOverlappedResult(self.handle(), &overlapped, &mut transferred, true);
-                return Err(
-                    io::Error::new(io::ErrorKind::TimedOut, "Pipe operation timed out").into(),
-                );
+                return Err(io_error(
+                    io::ErrorKind::TimedOut,
+                    "Pipe operation timed out",
+                ));
             }
             GetOverlappedResult(self.handle(), &overlapped, &mut transferred, false)?;
             Ok(transferred)
         }
     }
-    pub fn accept(&self) -> Result<()> {
-        self.overlapped(None, |overlapped| unsafe {
-            ConnectNamedPipe(self.handle(), Some(overlapped))
-        })
-        .map(|_| ())
-    }
-    pub fn disconnect(&self) -> Result<()> {
-        unsafe {
-            DisconnectNamedPipe(self.handle())?;
-        }
-        Ok(())
-    }
+
     fn read_exact(&self, buffer: &mut [u8], deadline: Instant) -> Result<()> {
         let mut offset = 0;
         while offset < buffer.len() {
-            let n = self.overlapped(Some(deadline), |overlapped| unsafe {
+            let read = self.overlapped(Some(deadline), |overlapped| unsafe {
                 ReadFile(
                     self.handle(),
                     Some(&mut buffer[offset..]),
@@ -195,17 +266,18 @@ impl Pipe {
                     Some(overlapped),
                 )
             })? as usize;
-            if n == 0 {
+            if read == 0 {
                 return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
             }
-            offset += n;
+            offset += read;
         }
         Ok(())
     }
+
     fn write_all(&self, buffer: &[u8], deadline: Instant) -> Result<()> {
         let mut offset = 0;
         while offset < buffer.len() {
-            let n = self.overlapped(Some(deadline), |overlapped| unsafe {
+            let written = self.overlapped(Some(deadline), |overlapped| unsafe {
                 WriteFile(
                     self.handle(),
                     Some(&buffer[offset..]),
@@ -213,65 +285,23 @@ impl Pipe {
                     Some(overlapped),
                 )
             })? as usize;
-            if n == 0 {
+            if written == 0 {
                 return Err(io::Error::from(io::ErrorKind::WriteZero).into());
             }
-            offset += n;
+            offset += written;
         }
         Ok(())
-    }
-    pub fn receive<T: DeserializeOwned>(&self, timeout: Duration) -> Result<T> {
-        let deadline = Instant::now() + timeout;
-        let mut header = [0; 4];
-        self.read_exact(&mut header, deadline)?;
-        let length = u32::from_le_bytes(header) as usize;
-        if length > MAX_FRAME {
-            return Err(
-                io::Error::new(io::ErrorKind::InvalidData, "Pipe frame is too large").into(),
-            );
-        }
-        let mut bytes = vec![0; length];
-        self.read_exact(&mut bytes, deadline)?;
-        Ok(serde_json::from_slice(&bytes)?)
-    }
-    /// Serves one connection: receives a request, sends `respond(request)`
-    /// and waits for the client to acknowledge it.
-    pub fn answer<Q: DeserializeOwned, R: Serialize>(
-        &self,
-        timeout: Duration,
-        respond: impl FnOnce(Q) -> R,
-    ) -> Result<()> {
-        let request = self.receive::<Q>(timeout)?;
-        self.send(&respond(request), timeout)?;
-        if self.receive::<u8>(timeout)? != ACKNOWLEDGEMENT {
-            return Err(
-                io::Error::new(io::ErrorKind::InvalidData, "Invalid acknowledgement").into(),
-            );
-        }
-        Ok(())
-    }
-    pub fn send<T: Serialize>(&self, value: &T, timeout: Duration) -> Result<()> {
-        let bytes = serde_json::to_vec(value)?;
-        if bytes.len() > MAX_FRAME {
-            return Err(
-                io::Error::new(io::ErrorKind::InvalidData, "Pipe frame is too large").into(),
-            );
-        }
-        let deadline = Instant::now() + timeout;
-        self.write_all(&(bytes.len() as u32).to_le_bytes(), deadline)?;
-        self.write_all(&bytes, deadline)
     }
 }
 
-pub fn exchange<Q: Serialize, R: DeserializeOwned>(request: &Q, timeout: Duration) -> Result<R> {
-    exchange_channel(DEFAULT_CHANNEL, request, timeout)
-}
-pub fn exchange_channel<Q: Serialize, R: DeserializeOwned>(
-    channel: &str,
+/// Sends `request` over a new connection to the pipe `name` and returns the
+/// response.
+pub fn call<Q: Serialize, R: DeserializeOwned>(
+    name: &str,
     request: &Q,
     timeout: Duration,
 ) -> Result<R> {
-    let pipe = Pipe::connect_channel(channel, timeout)?;
+    let pipe = Pipe::connect(name, timeout)?;
     pipe.send(request, timeout)?;
     let response = pipe.receive(timeout)?;
     pipe.send(&ACKNOWLEDGEMENT, timeout)?;
@@ -281,10 +311,12 @@ pub fn exchange_channel<Q: Serialize, R: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn exchanges_frames_and_cancels_a_stalled_read() {
-        let channel = format!("test-{}", std::process::id());
-        let server = Pipe::server_channel(&channel).unwrap();
+        let name = format!("test-{}", std::process::id());
+        let server = Pipe::listen(&name).unwrap();
+        assert!(Pipe::listen(&name).is_err());
         let thread = std::thread::spawn(move || {
             for _ in 0..2 {
                 server.accept().unwrap();
@@ -307,12 +339,11 @@ mod tests {
         });
         for _ in 0..2 {
             assert_eq!(
-                exchange_channel::<_, String>(&channel, &"にほんご", Duration::from_secs(1))
-                    .unwrap(),
+                call::<_, String>(&name, &"にほんご", Duration::from_secs(1)).unwrap(),
                 "日本語".repeat(10_000)
             );
         }
-        let client = Pipe::connect_channel(&channel, Duration::from_secs(1)).unwrap();
+        let client = Pipe::connect(&name, Duration::from_secs(1)).unwrap();
         client.send(&"にほんご", Duration::from_secs(1)).unwrap();
         assert_eq!(
             client.receive::<String>(Duration::from_secs(1)).unwrap(),
@@ -322,5 +353,12 @@ mod tests {
         assert!(client.receive::<String>(Duration::from_millis(20)).is_err());
         assert!(start.elapsed() < Duration::from_secs(1));
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_names_outside_the_pipe_namespace() {
+        for name in ["", r"..\other", "a/b", &"x".repeat(MAX_NAME_LENGTH + 1)] {
+            assert!(path(name).is_err());
+        }
     }
 }

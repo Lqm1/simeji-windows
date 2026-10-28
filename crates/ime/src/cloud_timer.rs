@@ -66,12 +66,12 @@ unsafe extern "system" fn poll_cloud(_window: HWND, _message: u32, id: usize, _t
         },
         Err(_) => return,
     };
-    let Some(words) = Worker.poll_cloud(reading.clone()) else {
+    let Some(candidates) = Worker.poll_cloud(reading.clone()) else {
         return;
     };
     if public()
         && let Ok(mut composer) = shared.composer.try_borrow_mut()
     {
-        composer.receive_cloud_words(&reading, words);
+        composer.receive_cloud_candidates(&reading, candidates);
     }
 }

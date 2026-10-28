@@ -22,9 +22,9 @@ Cargoワークスペースは、実行されるプロセスと責務ごとにク
 | `crates/worker`（simeji-worker） | `simeji-worker`、`simeji-launcher`、`simeji-cloud` | 変換ワーカー、その起動、クラウド設定 |
 | `crates/engine`（simeji-engine） | ライブラリ | ARM変換エンジンの実行と変換・学習API |
 | `crates/protocol`（simeji-protocol） | ライブラリ | DLLとワーカー間の要求と応答の型 |
-| `crates/transport`（simeji-transport） | ライブラリ | 所有者限定の名前付きパイプ |
+| `crates/transport`（simeji-transport） | ライブラリ | ユーザーのセッションごとの名前付きパイプ |
 
-`assets/` は実行時アセット。`assets/native` のARMライブラリは `simeji-engine` に埋め込み、`assets/dict` はパッケージに同梱する。
+`assets/` は実行時アセット。`assets/native` のARMライブラリは `simeji-engine` に埋め込み、`assets/dictionary` はパッケージの `Dictionary` として同梱する。
 
 ## Windows側
 
@@ -56,7 +56,9 @@ TSF・COMとの接続層:
 
 元のエンジンと辞書を使うのは、独自変換による近似を避けるため。ARMライブラリをUnicornで実行することで、Windows x64から利用する。TSF DLLとワーカーを分け、エンジンの実行状態を入力先アプリのプロセスから分離する。ただし、同期要求を待つ間の入力遅延まで防ぐ構成ではない。
 
-`crates/protocol` は変換・学習などの要求と応答の型、`crates/transport` は所有者に制限したローカル名前付きパイプとタイムアウト付きの通信を担当する。
+`crates/protocol` は変換・学習などの要求と応答の型、`crates/transport` は名前付きパイプとタイムアウト付きの通信を担当する。
+
+パイプは `\\.\pipe\SimejiWindows\<ユーザーSID>\<セッションID>\Worker`。所有者をユーザーのSIDに固定し、そのユーザーに全権限、同じユーザーのAppContainerプロセスに読み書きを許可し、低整合性レベルからの書き込みを許可する。クライアントは所有者が自分のユーザーであることを確認してから送信し、サーバーには識別だけを許して偽装を許さない。所有者を明示するため、ワーカーが管理者権限で動いていても通常権限のアプリから接続できる。
 
 ## クラウド
 
@@ -64,7 +66,11 @@ TSF・COMとの接続層:
 
 ## 配置と権限
 
-`scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、製品を `%LOCALAPPDATA%\SimejiWindows\Versions` 以下に配置して登録する。学習・ユーザー辞書・クラウド設定は `UserData` 以下に保存する。
+`scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、プログラムと辞書を `%ProgramFiles%\SimejiWindows` に配置する。Program Files はAppContainerから読めるため、Microsoftの要件どおり辞書をここに置く。アプリが読み込んだままのDLLは上書きできないので、名前を変えて退避し、次回のインストールで削除する。
+
+`simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
+
+ユーザーデータは `%LOCALAPPDATA%\SimejiWindows` に置く。`settings.json`（設定）、`user-dictionary.json`（ユーザー辞書）、`Learning\`（エンジンの学習データ）、`Cache\`（削除可能なクラウドキャッシュ）に分ける。
 
 ワーカーは入力先アプリと接続できる通常権限で起動する。インストールに管理者権限が必要なことと、常駐ワーカーを管理者として起動することは別である。
 

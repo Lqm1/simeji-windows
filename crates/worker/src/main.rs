@@ -1,47 +1,47 @@
-use simeji_protocol::{Request, Response};
-use simeji_transport::exchange;
-use std::{error::Error, path::PathBuf, time::Duration};
+use simeji_protocol::{Request, Response, WORKER_PIPE};
+use simeji_worker::{installed_dictionary, server, user_data::UserData};
+use std::{error::Error, time::Duration};
 
-const USAGE: &str = "Usage: simeji-worker serve <dictionary-directory> <user-data-directory> | ping | convert <reading> | add-word <reading> <word>";
+const USAGE: &str =
+    "Usage: simeji-worker serve | ping | convert <reading> | add-word <reading> <word>";
+const TIMEOUT: Duration = Duration::from_secs(5);
 
-fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+type BoxError = Box<dyn Error + Send + Sync>;
+
+fn call(request: &Request) -> Result<Response, BoxError> {
+    match simeji_transport::call(WORKER_PIPE, request, TIMEOUT)? {
+        Response::Error(error) => Err(error.into()),
+        response => Ok(response),
+    }
+}
+
+fn main() -> Result<(), BoxError> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("serve") => {
-            let dictionary = PathBuf::from(args.next().ok_or("Missing dictionary directory")?);
-            let user_data = PathBuf::from(args.next().ok_or("Missing user data directory")?);
-            simeji_worker::server::serve(&dictionary, &user_data)?;
+            let user_data = UserData::locate().ok_or("LOCALAPPDATA is not set")?;
+            server::serve(&installed_dictionary()?, &user_data)?;
         }
-        Some("ping") => println!(
-            "{:?}",
-            exchange::<_, Response>(&Request::Ping, Duration::from_secs(1))?
-        ),
+        Some("ping") => println!("{:?}", call(&Request::Ping)?),
         Some("convert") => {
             let reading = args.next().ok_or("Missing reading")?;
-            let request = Request::Candidates {
+            let request = Request::ClauseCandidates {
                 reading,
                 context: String::new(),
             };
-            match exchange::<_, Response>(&request, Duration::from_secs(5))? {
-                Response::Candidates(candidates) => {
-                    for candidate in candidates {
-                        println!("{}\t{}", candidate.text, candidate.reading);
-                    }
-                }
-                Response::Error(error) => return Err(error.into()),
-                response => return Err(format!("Unexpected worker response: {response:?}").into()),
+            let Response::Candidates(candidates) = call(&request)? else {
+                return Err("Unexpected worker response".into());
+            };
+            for candidate in candidates {
+                println!("{}\t{}", candidate.text, candidate.reading);
             }
         }
         Some("add-word") => {
             let reading = args.next().ok_or("Missing reading")?;
             let text = args.next().ok_or("Missing word")?;
-            match exchange::<_, Response>(
-                &Request::AddWord { reading, text },
-                Duration::from_secs(5),
-            )? {
-                Response::Ready => {}
-                response => return Err(format!("Unexpected worker response: {response:?}").into()),
-            }
+            let Response::Done = call(&Request::AddWord { reading, text })? else {
+                return Err("Unexpected worker response".into());
+            };
         }
         _ => return Err(USAGE.into()),
     }

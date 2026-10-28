@@ -29,7 +29,7 @@ python -m pip install libclang ninja
 & '生成されたパッケージのパス\install.ps1'
 ```
 
-`%LOCALAPPDATA%\SimejiWindows\Versions` にプログラムを配置し、TSFプロファイルと現在のユーザーのログイン時起動を登録します。インストール先の `simeji-launcher.exe` を通常権限のセッションから起動してください。次のサインインからは自動起動します。Windowsの入力切替で「Simeji Windows」を選び、対象アプリを再起動して確認してください。
+`%ProgramFiles%\SimejiWindows` にプログラムと辞書を配置し、IMEをすべてのユーザー向けに登録して、実行したユーザーの入力方式に追加します。ワーカーはサインイン時に自動起動します。インストール直後は `%ProgramFiles%\SimejiWindows\simeji-launcher.exe` を通常権限のセッションから起動するか、サインインし直してください。Windowsの入力切替で「Simeji Windows」を選び、開いていたアプリを再起動して確認してください。
 
 半角／全角で日本語入力を切り替えます。ローマ字入力後、Spaceで変換、Space・上下キーで候補選択、左右キーで文節移動、1～7で表示中の候補を確定、Enterで確定、Escapeで変換解除／キャンセルです。
 
@@ -37,20 +37,27 @@ python -m pip install libclang ninja
 
 初期状態はオフです。有効にすると、入力中の読みを `https://cloud.simeji.me/py` へ送ります。入力スコープがパスワード・PIN・プライベート指定、または確認に失敗した場合は送信と学習を抑止します。アプリ側が入力欄を正しく通知する必要があります。
 
-インストールした版のフォルダーで次を実行します。
+次のコマンドで切り替えます。設定は `%LOCALAPPDATA%\SimejiWindows\settings.json` に保存します。
 
 ```powershell
-.\simeji-cloud.exe "$env:LOCALAPPDATA\SimejiWindows\UserData" enable
-.\simeji-cloud.exe "$env:LOCALAPPDATA\SimejiWindows\UserData" disable
+& "$env:ProgramFiles\SimejiWindows\simeji-cloud.exe" enable
+& "$env:ProgramFiles\SimejiWindows\simeji-cloud.exe" disable
 ```
 
 候補は、変換開始前に現在の読みと一致する応答を取得できた場合に加わります。通信失敗時もローカル変換を継続します。候補の縦表示はWindows向けで、Androidの横並び・画像表示は再現対象に含みません。
 
 ## ユーザー辞書と解除
 
-ワーカー起動中に `simeji-worker.exe add-word <読み> <単語>` で登録できます。学習と辞書は `%LOCALAPPDATA%\SimejiWindows\UserData` へ保存します。
+ワーカー起動中に `simeji-worker.exe add-word <読み> <単語>` で登録できます。データはユーザーごとに `%LOCALAPPDATA%\SimejiWindows` へ保存します。
 
-インストール先の版の `uninstall.ps1` を管理者PowerShellで実行すると、IME登録とログイン時起動を解除します。学習・辞書・プログラムファイルは残します。
+| 場所 | 内容 |
+| --- | --- |
+| `settings.json` | 設定（クラウド変換の有効・無効） |
+| `user-dictionary.json` | ユーザー辞書 |
+| `Learning\` | 変換エンジンの学習データ |
+| `Cache\` | クラウド変換のキャッシュ。削除しても構いません |
+
+`%ProgramFiles%\SimejiWindows\uninstall.ps1` を管理者PowerShellで実行すると、IME登録と自動起動を解除し、プログラムを削除します。ユーザーデータは残します。
 
 ## 開発
 

@@ -224,7 +224,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 document.candidate_window.hide();
                 document.public_field = false;
             }
-            self.shared.composer.borrow_mut().discard_cloud_words();
+            self.shared.composer.borrow_mut().discard_cloud_candidates();
         }
         Ok(())
     }

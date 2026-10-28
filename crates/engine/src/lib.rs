@@ -12,6 +12,6 @@ mod error;
 mod host;
 mod user_dictionary;
 
-pub use engine::Engine;
+pub use engine::{Engine, EnginePaths};
 pub use error::EngineError;
 pub use simeji_protocol::{Candidate, Clause, Conversion};

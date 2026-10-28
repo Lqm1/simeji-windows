@@ -11,7 +11,7 @@ use crate::{
     keys::Key,
     worker::{Converter, WorkerError},
 };
-use simeji_protocol::{Candidate, Clause, CloudWord};
+use simeji_protocol::{Candidate, Clause, CloudCandidate};
 use std::ops::Range;
 
 /// Typing beyond this much romaji first commits what was typed so far.
@@ -59,7 +59,7 @@ pub(crate) struct Composer {
     cloud_sentence: Option<String>,
     learning_candidate: Option<Candidate>,
     cloud_enabled: bool,
-    cloud_words: Vec<CloudWord>,
+    cloud_candidates: Vec<CloudCandidate>,
     effects: Vec<Effect>,
 }
 
@@ -75,7 +75,7 @@ impl Composer {
             cloud_sentence: None,
             learning_candidate: None,
             cloud_enabled: false,
-            cloud_words: Vec::new(),
+            cloud_candidates: Vec::new(),
             effects: Vec::new(),
         }
     }
@@ -175,15 +175,15 @@ impl Composer {
         self.reading.clear();
         self.focus = 0;
         self.leave_conversion();
-        self.cloud_words.clear();
+        self.cloud_candidates.clear();
     }
 
     pub fn set_cloud_enabled(&mut self, enabled: bool) {
         self.cloud_enabled = enabled;
     }
 
-    pub fn discard_cloud_words(&mut self) {
-        self.cloud_words.clear();
+    pub fn discard_cloud_candidates(&mut self) {
+        self.cloud_candidates.clear();
     }
 
     /// The reading to poll for while cloud conversion is on, the user is
@@ -192,14 +192,14 @@ impl Composer {
         (self.cloud_enabled
             && self.is_composing()
             && !self.is_converting()
-            && self.cloud_words.is_empty())
+            && self.cloud_candidates.is_empty())
         .then_some(self.reading.as_str())
     }
 
     /// Keeps cloud results that are still for the current, unconverted reading.
-    pub fn receive_cloud_words(&mut self, reading: &str, words: Vec<CloudWord>) {
+    pub fn receive_cloud_candidates(&mut self, reading: &str, candidates: Vec<CloudCandidate>) {
         if self.reading == reading && !self.is_converting() {
-            self.cloud_words = words;
+            self.cloud_candidates = candidates;
         }
     }
 
@@ -227,14 +227,14 @@ impl Composer {
             return Ok(true);
         }
         self.reading = converter.transliterate(&self.romaji)?;
-        self.cloud_words.clear();
+        self.cloud_candidates.clear();
         self.show();
         self.effects.push(Effect::QueueCloud(self.reading.clone()));
         Ok(true)
     }
 
     fn convert(&mut self, converter: &mut impl Converter) -> Result<(), WorkerError> {
-        let conversion = converter.convert(&self.reading)?;
+        let conversion = converter.convert_sentence(&self.reading)?;
         self.learning_candidate = conversion.candidates.into_iter().next();
         self.clauses = conversion.clauses;
         self.focus = 0;
@@ -252,9 +252,9 @@ impl Composer {
             .iter()
             .map(|clause| clause.text.as_str())
             .collect::<String>();
-        let engine = converter.candidates(&clause.reading, &context)?;
+        let engine = converter.clause_candidates(&clause.reading, &context)?;
         self.candidates =
-            CandidateList::new(engine, &self.cloud_words, &self.reading, &clause.text);
+            CandidateList::new(engine, &self.cloud_candidates, &self.reading, &clause.text);
         Ok(())
     }
 
@@ -377,7 +377,7 @@ mod tests {
             }
             Ok(romaji.to_owned())
         }
-        fn convert(&mut self, reading: &str) -> Result<Conversion, WorkerError> {
+        fn convert_sentence(&mut self, reading: &str) -> Result<Conversion, WorkerError> {
             let text = self
                 .clauses
                 .iter()
@@ -395,7 +395,7 @@ mod tests {
                     .collect(),
             })
         }
-        fn candidates(
+        fn clause_candidates(
             &mut self,
             reading: &str,
             context: &str,
@@ -751,16 +751,16 @@ mod tests {
         composer.set_cloud_enabled(true);
         type_text(&mut composer, &mut converter, "kyouha");
         assert_eq!(composer.cloud_lookup_reading(), Some("kyouha"));
-        let words = vec![CloudWord {
+        let candidates = vec![CloudCandidate {
             text: "今日は晴れ".into(),
             reading: "kyouha".into(),
             property: 0,
             kind: 0,
             scene: String::new(),
         }];
-        composer.receive_cloud_words("kyou", words.clone());
+        composer.receive_cloud_candidates("kyou", candidates.clone());
         assert_eq!(composer.cloud_lookup_reading(), Some("kyouha"));
-        composer.receive_cloud_words("kyouha", words);
+        composer.receive_cloud_candidates("kyouha", candidates);
         assert_eq!(composer.cloud_lookup_reading(), None);
         composer.take_effects();
         press(&mut composer, &mut converter, SPACE);
