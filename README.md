@@ -2,7 +2,7 @@
 
 Windows 11 x64向けのRust製日本語IMEです。Simeji 23.6.1の変換エンジンと辞書を使い、ARMライブラリをUnicornで実行します。変換はワーカー、入力欄との連携はTSF DLLが担当します。
 
-利用者によるChrome・Codexなどでの日本語入力確認は完了しています。現在は入力のもたつき、Backspace、変換候補画面などの改善段階です。確認の範囲と残課題は[検証状況](docs/status.md)を参照してください。
+キー操作はMicrosoft IMEに、インストール・登録・データの配置はWindows IMEの標準的な形に合わせています。確認の範囲と残課題は[検証状況](docs/status.md)を参照してください。
 
 ## 製品文書
 
@@ -31,7 +31,7 @@ python -m pip install libclang ninja
 
 `%ProgramFiles%\SimejiWindows` にプログラムと辞書を配置し、IMEをすべてのユーザー向けに登録して、実行したユーザーの入力方式に追加します。ワーカーはサインイン時に自動起動します。インストール直後は `%ProgramFiles%\SimejiWindows\simeji-launcher.exe` を通常権限のセッションから起動するか、サインインし直してください。Windowsの入力切替で「Simeji Windows」を選び、開いていたアプリを再起動して確認してください。
 
-キー操作はMicrosoft IMEに合わせています。
+キー操作はMicrosoft IMEに合わせています。日本語入力のオン・オフはタスクバーの入力インジケーター（「あ」「A」）にも表示され、クリックでも切り替えられます。
 
 | 状態 | キー | 動作 |
 | --- | --- | --- |

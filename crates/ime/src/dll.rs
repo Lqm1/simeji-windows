@@ -140,6 +140,8 @@ mod tests {
                 let factory = IClassFactory::from_raw(output);
                 assert_eq!(DllCanUnloadNow(), S_FALSE);
                 let service: ITfTextInputProcessor = factory.CreateInstance(None)?;
+                let _: ITfTextInputProcessorEx = service.cast()?;
+                let _: ITfCompartmentEventSink = service.cast()?;
                 let _: ITfKeyEventSink = service.cast()?;
                 let _: ITfCompositionSink = service.cast()?;
                 {

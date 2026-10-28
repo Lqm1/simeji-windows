@@ -40,9 +40,11 @@ TSFに依存しない層:
 TSF・COMとの接続層:
 
 - `dll`: DLLエントリポイント、クラスファクトリ、アンロード判定。
-- `text_service`: `ITfTextInputProcessor`、`ITfKeyEventSink` などの実装。キーを `composer` に渡し、返された操作を編集セッションで文書へ適用する。確定時の学習とクラウド照会は、入力スコープが許す場合だけ行う。
+- `text_service`: `ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfCompartmentEventSink` などの実装。キーを `composer` に渡し、返された操作を編集セッションで文書へ適用する。確定時の学習とクラウド照会は、入力スコープが許す場合だけ行う。
+- `input_mode`、`mode_icon`: 日本語入力のオン・オフをTSFのコンパートメント（`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`）で管理する。アプリ・入力インジケーター・タッチキーボードからの変更にも従い、オフにすると入力中の文字を確定する。入力インジケーターには `GUID_LBI_INPUTMODE` のボタンとして「あ」「A」のアイコン（実行時に描画）を表示し、クリックで切り替える。有効化時は日本語入力をオンにする。
 - `edit_session`: 未確定文字の書き込み、表示属性、キャレット、候補ウィンドウの位置。
-- `display_attributes`、`candidate_window`、`input_scope`、`cloud_timer`、`registration`: 表示属性、候補ウィンドウ、入力スコープの判定、クラウド結果の取得、登録。
+- `candidate_window`: アプリのウィンドウに所有されるウィンドウ。モニターのDPIに合わせて拡大し、表示・移動・非表示を `EVENT_OBJECT_IME_SHOW`・`EVENT_OBJECT_IME_CHANGE`・`EVENT_OBJECT_IME_HIDE` で通知する。
+- `display_attributes`、`input_scope`、`cloud_timer`、`registration`: 表示属性、入力スコープの判定、クラウド結果の取得、登録。
 
 候補ウィンドウは2回目の変換操作で開く。最初の変換で文節候補を取得しないため、変換の応答が速い。
 
@@ -72,7 +74,7 @@ TSF・COMとの接続層:
 
 `scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、プログラムと辞書を `%ProgramFiles%\SimejiWindows` に配置する。Program Files はAppContainerから読めるため、Microsoftの要件どおり辞書をここに置く。アプリが読み込んだままのDLLは上書きできないので、名前を変えて退避し、次回のインストールで削除する。
 
-`simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
+`simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。カテゴリはキーボード（`GUID_TFCAT_TIP_KEYBOARD`）と表示属性に加え、Windowsストアアプリ対応（`IMMERSIVESUPPORT`）、入力インジケーター対応（`SYSTRAYSUPPORT`）、入力モードのコンパートメント（`INPUTMODECOMPARTMENT`）、COMを介さない読み込み（`COMLESS`）を登録する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
 
 ユーザーデータは `%LOCALAPPDATA%\SimejiWindows` に置く。`settings.json`（設定）、`user-dictionary.json`（ユーザー辞書）、`Learning\`（エンジンの学習データ）、`Cache\`（削除可能なクラウドキャッシュ）に分ける。
 

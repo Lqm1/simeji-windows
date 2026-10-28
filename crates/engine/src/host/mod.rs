@@ -86,7 +86,6 @@ impl Host {
         self.heap.free(address)
     }
 
-    /// Copies `bytes` to a new NUL-terminated heap block.
     pub fn store_c_string(
         &mut self,
         guest: &mut Guest<'_>,

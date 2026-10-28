@@ -173,13 +173,10 @@ impl Composer {
             return Ok(false);
         }
         if key == Key::ToggleInputMode {
-            if self.is_composing() {
-                self.commit();
-            }
-            self.mode = match self.mode {
+            self.set_mode(match self.mode {
                 InputMode::Japanese => InputMode::Direct,
                 InputMode::Direct => InputMode::Japanese,
-            };
+            });
             return Ok(true);
         }
         if self.is_converting() {
@@ -248,6 +245,22 @@ impl Composer {
             Key::ToggleInputMode => {}
         }
         Ok(true)
+    }
+
+    pub fn mode(&self) -> InputMode {
+        self.mode
+    }
+
+    /// Switches the input mode, committing the composition when leaving
+    /// Japanese input.
+    pub fn set_mode(&mut self, mode: InputMode) {
+        if mode == self.mode {
+            return;
+        }
+        if self.is_composing() {
+            self.commit();
+        }
+        self.mode = mode;
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {
@@ -1115,6 +1128,21 @@ mod tests {
         assert!(press(&mut composer, &mut converter, Key::ToggleInputMode));
         assert!(composer.accepts(PRINTABLE));
         assert!(composer.take_effects().is_empty());
+    }
+
+    #[test]
+    fn switching_the_mode_from_outside_commits_the_composition() {
+        let (mut composer, mut converter) = converted();
+        composer.set_mode(InputMode::Japanese);
+        assert!(composer.take_effects().is_empty());
+        composer.set_mode(InputMode::Direct);
+        assert!(matches!(
+            composer.take_effects().as_slice(),
+            [Effect::Commit { .. }]
+        ));
+        assert_eq!(composer.mode(), InputMode::Direct);
+        assert!(!composer.accepts(PRINTABLE));
+        assert!(!press(&mut composer, &mut converter, PRINTABLE));
     }
 
     #[test]

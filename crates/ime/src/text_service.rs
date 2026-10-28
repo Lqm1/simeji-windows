@@ -4,11 +4,12 @@
 use crate::{
     candidate_window::CandidateWindow,
     cloud_timer::CloudTimer,
-    composer::{Composer, Effect, Learning},
+    composer::{Composer, Effect, InputMode, Learning},
     display_attributes::{self, AttributeAtoms},
     dll::DllRef,
     edit_session::{Edit, EditSession},
-    keys::{self, Modifiers},
+    input_mode::{self, InputModeButton},
+    keys::{self, Key, Modifiers},
     worker::Worker,
 };
 use std::{
@@ -47,11 +48,22 @@ impl Document {
     }
 }
 
+/// The input mode compartment this service follows and the indicator
+/// button that shows it.
+struct InputModeState {
+    open_close: ITfCompartment,
+    sink_cookie: u32,
+    button: ComObject<InputModeButton>,
+    /// Whether the input indicator accepted the button.
+    shown: bool,
+}
+
 #[implement(
-    ITfTextInputProcessor,
+    ITfTextInputProcessorEx,
     ITfKeyEventSink,
     ITfCompositionSink,
-    ITfDisplayAttributeProvider
+    ITfDisplayAttributeProvider,
+    ITfCompartmentEventSink
 )]
 pub(crate) struct TextService {
     shared: Rc<Shared>,
@@ -59,6 +71,7 @@ pub(crate) struct TextService {
     client_id: Cell<u32>,
     atoms: Cell<AttributeAtoms>,
     cloud_timer: RefCell<Option<CloudTimer>>,
+    input_mode: RefCell<Option<InputModeState>>,
     _dll: DllRef,
 }
 
@@ -73,6 +86,7 @@ impl TextService {
             client_id: Cell::new(0),
             atoms: Cell::new(AttributeAtoms::default()),
             cloud_timer: RefCell::new(None),
+            input_mode: RefCell::new(None),
             _dll: DllRef::new(),
         }
     }
@@ -106,8 +120,82 @@ impl TextService_Impl {
             // The document did not change, so neither does the composition.
             *self.shared.composer.borrow_mut() = before;
         }
+        if key == Key::ToggleInputMode {
+            self.publish_mode()?;
+        }
         result?;
         Ok(handled?.into())
+    }
+
+    /// Writes the composer's mode to the compartment, which updates the
+    /// indicator through [`ITfCompartmentEventSink_Impl::OnChange`].
+    fn publish_mode(&self) -> Result<()> {
+        let open_close = self
+            .input_mode
+            .borrow()
+            .as_ref()
+            .map(|state| state.open_close.clone());
+        match open_close {
+            Some(open_close) => {
+                let mode = self.shared.composer.borrow().mode();
+                input_mode::write(&open_close, self.client_id.get(), mode)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Follows the compartment, adds the mode button to the input indicator
+    /// and switches Japanese input on, as a newly activated IME should be.
+    fn activate_input_mode(&self, thread: &ITfThreadMgr, client_id: u32) -> Result<()> {
+        let open_close = input_mode::open_close(thread)?;
+        let sink: ITfCompartmentEventSink = self.to_interface();
+        let sink_cookie = unsafe {
+            open_close
+                .cast::<ITfSource>()?
+                .AdviseSink(&ITfCompartmentEventSink::IID, &sink)?
+        };
+        let button = ComObject::new(InputModeButton::new(
+            open_close.clone(),
+            client_id,
+            InputMode::Japanese,
+        ));
+        // Without the indicator button the IME still works, so a failure to
+        // add it does not fail the activation.
+        let shown = thread
+            .cast::<ITfLangBarItemMgr>()
+            .and_then(|items| unsafe {
+                items.AddItem(&button.to_interface::<ITfLangBarItemButton>())
+            })
+            .is_ok();
+        *self.input_mode.borrow_mut() = Some(InputModeState {
+            open_close: open_close.clone(),
+            sink_cookie,
+            button,
+            shown,
+        });
+        let _ = input_mode::write_conversion_mode(thread, client_id);
+        input_mode::write(&open_close, client_id, InputMode::Japanese)
+    }
+
+    fn deactivate_input_mode(&self, thread: &ITfThreadMgr) {
+        let Some(state) = self.input_mode.borrow_mut().take() else {
+            return;
+        };
+        unsafe {
+            if let Ok(source) = state.open_close.cast::<ITfSource>() {
+                let _ = source.UnadviseSink(state.sink_cookie);
+            }
+            if let Ok(items) = thread.cast::<ITfLangBarItemMgr>()
+                && state.shown
+            {
+                let _ = items.RemoveItem(&state.button.to_interface::<ITfLangBarItemButton>());
+            }
+        }
+    }
+
+    fn composition_context(&self) -> Option<ITfContext> {
+        let composition = self.shared.document.borrow().composition.clone()?;
+        unsafe { composition.GetRange().and_then(|range| range.GetContext()) }.ok()
     }
 
     /// Applies the queued effects in order and returns how many succeeded.
@@ -190,6 +278,26 @@ impl TextService_Impl {
 
 impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Activate(&self, thread: Ref<ITfThreadMgr>, client: u32) -> Result<()> {
+        self.ActivateEx(thread, client, 0)
+    }
+
+    fn Deactivate(&self) -> Result<()> {
+        self.cloud_timer.borrow_mut().take();
+        let thread = self.thread_manager.borrow_mut().take();
+        if let Some(thread) = thread {
+            self.deactivate_input_mode(&thread);
+            let keystrokes: ITfKeystrokeMgr = thread.cast()?;
+            unsafe {
+                keystrokes.UnadviseKeyEventSink(self.client_id.get())?;
+            }
+        }
+        self.reset();
+        Ok(())
+    }
+}
+
+impl ITfTextInputProcessorEx_Impl for TextService_Impl {
+    fn ActivateEx(&self, thread: Ref<ITfThreadMgr>, client: u32, _flags: u32) -> Result<()> {
         let thread = thread.ok()?;
         let keystrokes: ITfKeystrokeMgr = thread.cast()?;
         let sink: ITfKeyEventSink = self.to_interface();
@@ -200,20 +308,36 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         self.client_id.set(client);
         *self.thread_manager.borrow_mut() = Some(thread.clone());
         *self.cloud_timer.borrow_mut() = CloudTimer::start(&self.shared);
-        Ok(())
+        self.activate_input_mode(thread, client)
     }
+}
 
-    fn Deactivate(&self) -> Result<()> {
-        self.cloud_timer.borrow_mut().take();
-        let thread = self.thread_manager.borrow_mut().take();
-        if let Some(thread) = thread {
-            let keystrokes: ITfKeystrokeMgr = thread.cast()?;
-            unsafe {
-                keystrokes.UnadviseKeyEventSink(self.client_id.get())?;
-            }
+impl ITfCompartmentEventSink_Impl for TextService_Impl {
+    /// Follows input mode changes from the application, the input indicator
+    /// or this service; leaving Japanese input commits the composition.
+    fn OnChange(&self, guid: *const GUID) -> Result<()> {
+        if guid.is_null() || unsafe { *guid } != GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+            return Ok(());
         }
-        self.reset();
-        Ok(())
+        let state = self
+            .input_mode
+            .borrow()
+            .as_ref()
+            .map(|state| (state.open_close.clone(), state.button.clone()));
+        let Some((open_close, button)) = state else {
+            return Ok(());
+        };
+        let mode = input_mode::read(&open_close);
+        self.shared.composer.borrow_mut().set_mode(mode);
+        let result = match self.composition_context() {
+            Some(context) => self.apply_effects(&context).1,
+            None => {
+                self.shared.composer.borrow_mut().take_effects();
+                Ok(())
+            }
+        };
+        button.update(mode);
+        result
     }
 }
 
@@ -271,5 +395,48 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
     }
     fn OnPreservedKey(&self, _context: Ref<ITfContext>, _key: *const GUID) -> Result<BOOL> {
         Ok(false.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
+    };
+
+    /// A text service needs a TIP client ID to watch keys, which an
+    /// unregistered DLL does not get, so this drives the input mode part.
+    #[test]
+    fn the_input_mode_follows_the_compartment_and_the_indicator_button() -> Result<()> {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let result = (|| {
+                let thread: ITfThreadMgr =
+                    CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+                let client = thread.Activate()?;
+                let service = ComObject::new(TextService::new());
+                service.client_id.set(client);
+                service.activate_input_mode(&thread, client)?;
+                let open_close = input_mode::open_close(&thread)?;
+                assert_eq!(input_mode::read(&open_close), InputMode::Japanese);
+                assert_eq!(service.shared.composer.borrow().mode(), InputMode::Japanese);
+                input_mode::write(&open_close, client, InputMode::Direct)?;
+                assert_eq!(service.shared.composer.borrow().mode(), InputMode::Direct);
+                let button = service.input_mode.borrow().as_ref().unwrap().button.clone();
+                let button: ITfLangBarItemButton = button.to_interface();
+                assert_eq!(button.GetText()?, "A");
+                button.OnClick(TF_LBI_CLK_LEFT, POINT::default(), std::ptr::null())?;
+                assert_eq!(service.shared.composer.borrow().mode(), InputMode::Japanese);
+                assert_eq!(button.GetText()?, "あ");
+                service.deactivate_input_mode(&thread);
+                assert!(service.input_mode.borrow().is_none());
+                thread.Deactivate()?;
+                Ok(())
+            })();
+            CoUninitialize();
+            result
+        }
     }
 }
