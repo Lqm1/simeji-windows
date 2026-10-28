@@ -16,13 +16,28 @@ pub(crate) struct Choice {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Page {
-    pub items: Vec<String>,
-    /// Index of the selected candidate within `items`.
+pub(crate) struct CandidateView {
+    pub texts: Vec<String>,
     pub selected: usize,
-    /// Index of the selected candidate among all candidates.
-    pub index: usize,
-    pub total: usize,
+}
+
+impl CandidateView {
+    pub fn page_start(&self) -> usize {
+        self.selected / PAGE_SIZE * PAGE_SIZE
+    }
+
+    pub fn page(&self) -> &[String] {
+        let start = self.page_start();
+        &self.texts[start..(start + PAGE_SIZE).min(self.texts.len())]
+    }
+
+    pub fn selected_on_page(&self) -> usize {
+        self.selected - self.page_start()
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.texts.len().div_ceil(PAGE_SIZE)
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,7 +107,6 @@ impl CandidateList {
         self.choices.get(self.selected)
     }
 
-    /// Moves the selection by `step`, wrapping around at both ends.
     pub fn move_selection(&mut self, step: isize) -> Option<&Choice> {
         let count = self.choices.len() as isize;
         if count == 0 {
@@ -102,7 +116,6 @@ impl CandidateList {
         self.selected()
     }
 
-    /// Moves by `step` pages, wrapping around, at the same place on the page.
     pub fn move_page(&mut self, step: isize) -> Option<&Choice> {
         let count = self.choices.len();
         if count == 0 {
@@ -125,20 +138,23 @@ impl CandidateList {
         self.selected()
     }
 
-    pub fn page(&self) -> Option<Page> {
-        if self.choices.is_empty() {
+    /// Selects the candidate at `index` among all candidates.
+    pub fn select(&mut self, index: usize) -> Option<&Choice> {
+        if index >= self.choices.len() {
             return None;
         }
-        let start = self.page_start();
-        Some(Page {
-            items: self.choices[start..]
+        self.selected = index;
+        self.selected()
+    }
+
+    pub fn view(&self) -> Option<CandidateView> {
+        (!self.choices.is_empty()).then(|| CandidateView {
+            texts: self
+                .choices
                 .iter()
-                .take(PAGE_SIZE)
                 .map(|choice| choice.candidate.text.clone())
                 .collect(),
-            selected: self.selected - start,
-            index: self.selected,
-            total: self.choices.len(),
+            selected: self.selected,
         })
     }
 
@@ -232,30 +248,27 @@ mod tests {
         let engine = (0..20).map(|n| candidate(&n.to_string())).collect();
         let mut list = CandidateList::new(engine, &[], "reading", "0");
         assert_eq!(list.move_selection(-1).unwrap().candidate.text, "19");
-        assert_eq!(
-            list.page(),
-            Some(Page {
-                items: vec!["18".into(), "19".into()],
-                selected: 1,
-                index: 19,
-                total: 20,
-            })
-        );
+        let view = list.view().unwrap();
+        assert_eq!(view.page(), ["18", "19"]);
+        assert_eq!((view.selected, view.selected_on_page()), (19, 1));
+        assert_eq!(view.page_count(), 3);
         assert_eq!(list.select_number(1).unwrap().candidate.text, "18");
         assert!(list.select_number(3).is_none());
         assert_eq!(list.move_selection(2).unwrap().candidate.text, "0");
         assert_eq!(list.select_number(9).unwrap().candidate.text, "8");
-        assert_eq!(list.page().unwrap().items.len(), PAGE_SIZE);
+        assert_eq!(list.view().unwrap().page().len(), PAGE_SIZE);
         assert_eq!(list.move_page(1).unwrap().candidate.text, "17");
         assert_eq!(list.move_page(1).unwrap().candidate.text, "19");
         assert_eq!(list.move_page(1).unwrap().candidate.text, "1");
         assert_eq!(list.move_page(-1).unwrap().candidate.text, "19");
+        assert_eq!(list.select(12).unwrap().candidate.text, "12");
+        assert!(list.select(20).is_none());
     }
 
     #[test]
     fn an_empty_list_has_no_page_or_selection() {
         let mut list = CandidateList::default();
-        assert!(list.page().is_none());
+        assert!(list.view().is_none());
         assert!(list.move_selection(1).is_none());
         assert!(list.move_page(1).is_none());
         assert!(list.select_number(1).is_none());

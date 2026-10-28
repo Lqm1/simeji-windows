@@ -89,7 +89,6 @@ impl User {
         PSID(self.sid.as_ptr().cast_mut().cast())
     }
 
-    /// Whether this user owns the kernel object behind `handle`.
     pub fn owns(&self, handle: HANDLE) -> Result<bool> {
         unsafe {
             let mut owner = PSID::default();

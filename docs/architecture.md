@@ -32,9 +32,9 @@ Cargoワークスペースは、実行されるプロセスと責務ごとにク
 
 TSFに依存しない層:
 
-- `keys`: 仮想キーと修飾キーを、IMEが扱うキー（変換、確定、取消、文節移動、候補番号など）へ対応付ける。
+- `keys`: 仮想キーと修飾キーを、IMEが扱うキー（変換、確定、取消、文節移動、候補番号など）へ対応付ける。タッチキーボードが `VK_PACKET` で送る文字のうち、候補のページキー（U+F003、U+F004）は文字と区別する。
 - `composer`: 未確定文字の状態機械。キー操作はMicrosoft IMEに合わせる。入力中は読みの中のカーソル（左側は入力中のローマ字を含み、右側はかな）を、変換中は文節ごとの読み・表記・選んだ候補を管理し、キーごとに文書へ反映する操作（表示、確定、取消、クラウド照会）を順に返す。確定時は選んだ文節の候補を前の文節の候補とともに学習し、何も選ばなければ文全体を学習する。
-- `candidates`: エンジン候補とクラウド候補の統合、候補の選択、7件単位のページ。
+- `candidates`: エンジン候補とクラウド候補の統合、候補の選択、9件単位のページ。
 - `worker`: 変換ワーカーへの要求。`composer` は `Converter` トレイトを通して変換を呼び出す。
 
 TSF・COMとの接続層:
@@ -45,6 +45,8 @@ TSF・COMとの接続層:
 - `edit_session`: 未確定文字の書き込み、表示属性、キャレット、候補ウィンドウの位置。
 - `candidate_window`: アプリのウィンドウに所有される独自クラスのウィンドウ。システムの配色で描き、選択中の候補を強調する。モニターのDPIに合わせて拡大し、表示・移動・非表示を `EVENT_OBJECT_IME_SHOW`・`EVENT_OBJECT_IME_CHANGE`・`EVENT_OBJECT_IME_HIDE` で通知する。クラス名にモジュールのアドレスを含め、別のアドレスで読み込まれた以前のDLLのクラスを使わない。
 - `candidate_accessibility`: 候補ウィンドウのUIオートメーション。Microsoftの規約どおり、オートメーションID `IME_Candidate_Window` のリストと候補ごとのリスト項目（名前は候補、選択状態付き）を公開し、表示・非表示で `MenuOpened`・`MenuClosed`、選択の変更で `ElementSelected` イベントを発生させる。
+- `candidate_element`: 候補一覧のTSF UI要素（`ITfCandidateListUIElementBehavior`、`ITfIntegratableCandidateListUIElement`）。候補の表示・変更・終了を `ITfUIElementMgr` に通知する。全画面のゲームや検索ボックスのように候補を自分で描くアプリ（UIレスモード）が非表示を求めた場合は、候補ウィンドウを出さない。アプリからの候補の選択・確定・取消は、キー操作と同じく `composer` を通して文書へ反映する。
+- `functions`: TSFの関数プロバイダー。タッチキーボードには日本語のタッチ最適化レイアウト（`TKBL_OPT_JAPANESE_ABC`）を求める。検索（`ITfFnSearchCandidateProvider`）には、1語として変換される読みならその候補一覧を、文になる読みなら変換した文を返し、選ばれた候補を学習する。
 - `display_attributes`、`input_scope`、`cloud_timer`、`registration`: 表示属性、入力スコープの判定、クラウド結果の取得、登録。
 
 候補ウィンドウは2回目の変換操作で開く。最初の変換で文節候補を取得しないため、変換の応答が速い。
@@ -75,7 +77,7 @@ TSF・COMとの接続層:
 
 `scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、プログラムと辞書を `%ProgramFiles%\SimejiWindows` に配置する。Program Files はAppContainerから読めるため、Microsoftの要件どおり辞書をここに置く。アプリが読み込んだままのDLLは上書きできないので、名前を変えて退避し、次回のインストールで削除する。
 
-`simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。入力インジケーターのブランドアイコン（白い四角に黒い「S」）は、ビルドスクリプトがMicrosoftの指定する16〜48ピクセルで描いてDLLのリソースに含め、プロファイルはその最初のアイコンを指す。カテゴリはキーボード（`GUID_TFCAT_TIP_KEYBOARD`）と表示属性に加え、Windowsストアアプリ対応（`IMMERSIVESUPPORT`）、入力インジケーター対応（`SYSTRAYSUPPORT`）、入力モードのコンパートメント（`INPUTMODECOMPARTMENT`）、COMを介さない読み込み（`COMLESS`）を登録する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
+`simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。入力インジケーターのブランドアイコン（白い四角に黒い「S」）は、ビルドスクリプトがMicrosoftの指定する16〜48ピクセルで描いてDLLのリソースに含め、プロファイルはその最初のアイコンを指す。カテゴリはキーボード（`GUID_TFCAT_TIP_KEYBOARD`）と表示属性に加え、Windowsストアアプリ対応（`IMMERSIVESUPPORT`）、入力インジケーター対応（`SYSTRAYSUPPORT`）、入力モードのコンパートメント（`INPUTMODECOMPARTMENT`）、COMを介さない読み込み（`COMLESS`）、UIレスモード（`UIELEMENTENABLED`）を登録する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
 
 `install.ps1` は `migrate-user-data.ps1` で、以前のユーザー単位のインストール（`UserData` と `Versions`）を新しい配置へ移す。
 

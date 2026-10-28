@@ -139,8 +139,9 @@ impl EditSession {
         }
     }
 
-    /// Places the candidate window under the composition. It is left as it
-    /// is when the application cannot report where the text is.
+    /// Places the candidate window under the composition unless the
+    /// application draws the candidates. It is left as it is when the
+    /// application cannot report where the text is.
     fn show_candidates(&self, cookie: u32, range: &ITfRange, view: &CompositionView) -> Result<()> {
         unsafe {
             let active = self.context.GetActiveView()?;
@@ -155,8 +156,10 @@ impl EditSession {
             let parent = active.GetWnd().unwrap_or_else(|_| GetFocus());
             let mut document = self.shared.document.borrow_mut();
             match &view.candidates {
-                Some(page) => document.candidate_window.show(parent, rect, page),
-                None => {
+                Some(candidates) if !document.application_draws_candidates => {
+                    document.candidate_window.show(parent, rect, candidates)
+                }
+                _ => {
                     document.candidate_window.hide();
                     Ok(())
                 }

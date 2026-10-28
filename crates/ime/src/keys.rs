@@ -27,6 +27,10 @@ pub(crate) enum Key {
     },
     Home,
     End,
+    /// The candidate page key of the touch-optimized keyboard.
+    NextCandidatePage,
+    /// The candidate page key with Shift on the touch-optimized keyboard.
+    PreviousCandidatePage,
     /// A key that types a character. The number keys 1–9 also select the
     /// candidate with that number on the shown page.
     Printable {
@@ -125,6 +129,28 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     })
 }
 
+/// The touch keyboard sends its candidate page keys as these private use
+/// characters with `VK_PACKET`.
+fn touch_page_key(text: &str) -> Option<Key> {
+    match text {
+        "\u{f003}" => Some(Key::NextCandidatePage),
+        "\u{f004}" => Some(Key::PreviousCandidatePage),
+        _ => None,
+    }
+}
+
+/// The key of a key event, telling the touch keyboard's page keys apart
+/// from the characters it sends.
+pub(crate) fn read(vk: u32, lparam: LPARAM, modifiers: Modifiers) -> Option<Key> {
+    let key = classify(vk, modifiers)?;
+    if vk == vk_code(VK_PACKET)
+        && let Some(page_key) = typed_text(vk, lparam).as_deref().and_then(touch_page_key)
+    {
+        return Some(page_key);
+    }
+    Some(key)
+}
+
 /// The text the key types under the active keyboard layout, if any.
 pub(crate) fn typed_text(vk: u32, lparam: LPARAM) -> Option<String> {
     /// `ToUnicodeEx` flag: leave the keyboard state (dead keys) unchanged.
@@ -216,6 +242,13 @@ mod tests {
             .map(Some)
         );
         assert_eq!(classify(0x25, SHIFT), Some(Key::Left { shift: true }));
+    }
+
+    #[test]
+    fn recognises_the_touch_keyboard_page_keys() {
+        assert_eq!(touch_page_key("\u{f003}"), Some(Key::NextCandidatePage));
+        assert_eq!(touch_page_key("\u{f004}"), Some(Key::PreviousCandidatePage));
+        assert_eq!(touch_page_key("a"), None);
     }
 
     #[test]

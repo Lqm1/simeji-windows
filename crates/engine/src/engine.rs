@@ -89,7 +89,6 @@ const MAX_LIST_ENTRIES: u32 = 4096;
 pub struct EnginePaths<'a> {
     /// The bundled dictionaries, opened read-only.
     pub dictionary: &'a Path,
-    /// The engine's own learning files.
     pub learning: &'a Path,
     /// The user dictionary entries, as JSON.
     pub user_dictionary: &'a Path,

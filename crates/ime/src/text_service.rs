@@ -2,12 +2,15 @@
 //! applies the composer's effects to the document through edit sessions.
 
 use crate::{
+    candidate_element::{CandidateElement, Handler, Request},
     candidate_window::CandidateWindow,
+    candidates::CandidateView,
     cloud_timer::CloudTimer,
     composer::{Composer, Effect, InputMode, Learning},
     display_attributes::{self, AttributeAtoms},
     dll::DllRef,
     edit_session::{Edit, EditSession},
+    functions::Functions,
     input_mode::{self, InputModeButton},
     keys::{self, Key, Modifiers},
     worker::Worker,
@@ -38,6 +41,7 @@ pub(crate) struct Document {
     /// as last read by an edit session.
     pub public_field: bool,
     pub candidate_window: CandidateWindow,
+    pub application_draws_candidates: bool,
 }
 
 impl Document {
@@ -58,6 +62,11 @@ struct InputModeState {
     shown: bool,
 }
 
+struct CandidateElementState {
+    element: ComObject<CandidateElement>,
+    id: u32,
+}
+
 #[implement(
     ITfTextInputProcessorEx,
     ITfKeyEventSink,
@@ -72,6 +81,8 @@ pub(crate) struct TextService {
     atoms: Cell<AttributeAtoms>,
     cloud_timer: RefCell<Option<CloudTimer>>,
     input_mode: RefCell<Option<InputModeState>>,
+    ui_elements: RefCell<Option<ITfUIElementMgr>>,
+    candidate_element: RefCell<Option<CandidateElementState>>,
     _dll: DllRef,
 }
 
@@ -87,24 +98,41 @@ impl TextService {
             atoms: Cell::new(AttributeAtoms::default()),
             cloud_timer: RefCell::new(None),
             input_mode: RefCell::new(None),
+            ui_elements: RefCell::new(None),
+            candidate_element: RefCell::new(None),
             _dll: DllRef::new(),
         }
     }
 
     fn reset(&self) {
+        self.end_candidate_element();
         self.shared.document.borrow_mut().clear();
         self.shared.composer.borrow_mut().reset();
+    }
+
+    fn end_candidate_element(&self) {
+        let state = self.candidate_element.borrow_mut().take();
+        let manager = self.ui_elements.borrow().clone();
+        if let (Some(state), Some(manager)) = (state, manager) {
+            unsafe {
+                let _ = manager.EndUIElement(state.id);
+            }
+        }
+        self.shared
+            .document
+            .borrow_mut()
+            .application_draws_candidates = false;
     }
 }
 
 impl TextService_Impl {
-    fn wants_key(&self, vk: u32) -> bool {
-        keys::classify(vk, Modifiers::current())
+    fn wants_key(&self, vk: u32, lparam: LPARAM) -> bool {
+        keys::read(vk, lparam, Modifiers::current())
             .is_some_and(|key| self.shared.composer.borrow().accepts(key))
     }
 
     fn handle_key(&self, context: &ITfContext, vk: u32, lparam: LPARAM) -> Result<BOOL> {
-        let Some(key) = keys::classify(vk, Modifiers::current()) else {
+        let Some(key) = keys::read(vk, lparam, Modifiers::current()) else {
             return Ok(false.into());
         };
         let before = self.shared.composer.borrow().clone();
@@ -193,6 +221,114 @@ impl TextService_Impl {
         }
     }
 
+    /// The IME works without the function provider, so a failure does not
+    /// fail the activation.
+    fn advise_functions(thread: &ITfThreadMgr, client_id: u32) {
+        let functions: ITfFunctionProvider = Functions::new().into();
+        if let Ok(source) = thread.cast::<ITfSourceSingle>() {
+            unsafe {
+                let _ = source.AdviseSingleSink(client_id, &ITfFunctionProvider::IID, &functions);
+            }
+        }
+    }
+
+    fn unadvise_functions(thread: &ITfThreadMgr, client_id: u32) {
+        if let Ok(source) = thread.cast::<ITfSourceSingle>() {
+            unsafe {
+                let _ = source.UnadviseSingleSink(client_id, &ITfFunctionProvider::IID);
+            }
+        }
+    }
+
+    fn present_candidates(&self, context: &ITfContext, view: Option<&CandidateView>) {
+        let Some(view) = view else {
+            self.end_candidate_element();
+            return;
+        };
+        let Some(manager) = self.ui_elements.borrow().clone() else {
+            return;
+        };
+        let active = self
+            .candidate_element
+            .borrow()
+            .as_ref()
+            .map(|state| (state.element.clone(), state.id));
+        if let Some((element, id)) = active {
+            if element.update(view) {
+                unsafe {
+                    let _ = manager.UpdateUIElement(id);
+                }
+            }
+            return;
+        }
+        let document_manager = unsafe { context.GetDocumentMgr() }.ok();
+        let element = ComObject::new(CandidateElement::new(
+            document_manager,
+            view.clone(),
+            self.element_handler(),
+        ));
+        let mut show = BOOL::from(true);
+        let mut id = 0;
+        let begun = unsafe {
+            manager.BeginUIElement(&element.to_interface::<ITfUIElement>(), &mut show, &mut id)
+        };
+        if begun.is_err() {
+            return;
+        }
+        let shown = show.as_bool() && element.is_shown();
+        element.set_shown(shown);
+        self.shared
+            .document
+            .borrow_mut()
+            .application_draws_candidates = !shown;
+        *self.candidate_element.borrow_mut() = Some(CandidateElementState { element, id });
+    }
+
+    /// The service owns the element, so the element holds it weakly.
+    fn element_handler(&self) -> Handler {
+        let service = self.to_interface::<ITfKeyEventSink>().downgrade().ok();
+        Box::new(move |request| {
+            let Some(service) = service.as_ref().and_then(Weak::upgrade) else {
+                return Ok(());
+            };
+            ComObject::<TextService>::cast_from(&service)?.handle_element_request(request)
+        })
+    }
+
+    fn handle_element_request(&self, request: Request) -> Result<()> {
+        let context = self.composition_context();
+        match request {
+            Request::Act(action) => {
+                let Some(context) = context else {
+                    return Ok(());
+                };
+                let before = self.shared.composer.borrow().clone();
+                self.shared.composer.borrow_mut().act(action);
+                let (applied, result) = self.apply_effects(&context);
+                if applied == 0 && result.is_err() {
+                    *self.shared.composer.borrow_mut() = before;
+                }
+                result
+            }
+            Request::ShowCandidateWindow(show) => {
+                {
+                    let mut document = self.shared.document.borrow_mut();
+                    document.application_draws_candidates = !show;
+                    if !show {
+                        document.candidate_window.hide();
+                    }
+                }
+                match context {
+                    Some(context) if show => {
+                        let view = self.shared.composer.borrow().view();
+                        self.request_edit(&context, Edit::Show(view))
+                    }
+                    _ => Ok(()),
+                }
+            }
+        }
+    }
+
     fn composition_context(&self) -> Option<ITfContext> {
         let composition = self.shared.document.borrow().composition.clone()?;
         unsafe { composition.GetRange().and_then(|range| range.GetContext()) }.ok()
@@ -212,8 +348,12 @@ impl TextService_Impl {
 
     fn apply_effect(&self, context: &ITfContext, effect: Effect) -> Result<()> {
         match effect {
-            Effect::Show(view) => self.request_edit(context, Edit::Show(view)),
+            Effect::Show(view) => {
+                self.present_candidates(context, view.candidates.as_ref());
+                self.request_edit(context, Edit::Show(view))
+            }
             Effect::Commit { text, learn } => {
+                self.end_candidate_element();
                 let public = self.shared.document.borrow().public_field;
                 self.request_edit(context, Edit::Finish(text))?;
                 if public {
@@ -229,7 +369,10 @@ impl TextService_Impl {
                 }
                 Ok(())
             }
-            Effect::Cancel => self.request_edit(context, Edit::Finish(String::new())),
+            Effect::Cancel => {
+                self.end_candidate_element();
+                self.request_edit(context, Edit::Finish(String::new()))
+            }
             Effect::QueueCloud(reading) => {
                 let reading = if self.shared.document.borrow().public_field {
                     reading
@@ -252,6 +395,7 @@ impl TextService_Impl {
         };
         let previous = unsafe { composition.GetRange()?.GetContext()? };
         if previous != *context {
+            self.end_candidate_element();
             let text = self.shared.composer.borrow().text();
             self.request_edit(&previous, Edit::Finish(text))?;
             self.shared.composer.borrow_mut().reset();
@@ -284,14 +428,16 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
     fn Deactivate(&self) -> Result<()> {
         self.cloud_timer.borrow_mut().take();
         let thread = self.thread_manager.borrow_mut().take();
+        self.reset();
+        self.ui_elements.borrow_mut().take();
         if let Some(thread) = thread {
             self.deactivate_input_mode(&thread);
+            Self::unadvise_functions(&thread, self.client_id.get());
             let keystrokes: ITfKeystrokeMgr = thread.cast()?;
             unsafe {
                 keystrokes.UnadviseKeyEventSink(self.client_id.get())?;
             }
         }
-        self.reset();
         Ok(())
     }
 }
@@ -307,6 +453,8 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
         }
         self.client_id.set(client);
         *self.thread_manager.borrow_mut() = Some(thread.clone());
+        *self.ui_elements.borrow_mut() = thread.cast().ok();
+        Self::advise_functions(thread, client);
         *self.cloud_timer.borrow_mut() = CloudTimer::start(&self.shared);
         self.activate_input_mode(thread, client)
     }
@@ -370,17 +518,18 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 document.candidate_window.hide();
                 document.public_field = false;
             }
+            self.end_candidate_element();
             self.shared.composer.borrow_mut().discard_cloud_candidates();
         }
         Ok(())
     }
-    fn OnTestKeyDown(&self, context: Ref<ITfContext>, key: WPARAM, _flags: LPARAM) -> Result<BOOL> {
+    fn OnTestKeyDown(&self, context: Ref<ITfContext>, key: WPARAM, flags: LPARAM) -> Result<BOOL> {
         let editable = context.as_ref().is_some_and(|context| unsafe {
             context
                 .GetStatus()
                 .is_ok_and(|status| status.dwStaticFlags & TF_SD_READONLY == 0)
         });
-        Ok((editable && self.wants_key(key.0 as u32)).into())
+        Ok((editable && self.wants_key(key.0 as u32, flags)).into())
     }
     fn OnTestKeyUp(&self, _context: Ref<ITfContext>, _key: WPARAM, _flags: LPARAM) -> Result<BOOL> {
         Ok(false.into())
@@ -432,6 +581,71 @@ mod tests {
                 assert_eq!(button.GetText()?, "あ");
                 service.deactivate_input_mode(&thread);
                 assert!(service.input_mode.borrow().is_none());
+                thread.Deactivate()?;
+                Ok(())
+            })();
+            CoUninitialize();
+            result
+        }
+    }
+
+    #[test]
+    fn applications_can_draw_the_candidates_themselves() -> Result<()> {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+            let result = (|| {
+                let thread: ITfThreadMgr =
+                    CoCreateInstance(&CLSID_TF_ThreadMgr, None, CLSCTX_INPROC_SERVER)?;
+                let client = thread.Activate()?;
+                let manager: ITfUIElementMgr = thread.cast()?;
+                let service = ComObject::new(TextService::new());
+                *service.ui_elements.borrow_mut() = Some(manager.clone());
+                let documents = thread.CreateDocumentMgr()?;
+                let mut context = None;
+                let mut cookie = 0;
+                documents.CreateContext(client, 0, None, &mut context, &mut cookie)?;
+                let context = context.unwrap();
+                let view = CandidateView {
+                    texts: vec!["今日".into(), "京".into()],
+                    selected: 0,
+                };
+                service.present_candidates(&context, Some(&view));
+                let id = service.candidate_element.borrow().as_ref().unwrap().id;
+                let list: ITfCandidateListUIElement = manager.GetUIElement(id)?.cast()?;
+                assert_eq!(list.GetCount()?, 2);
+                assert!(
+                    !service
+                        .shared
+                        .document
+                        .borrow()
+                        .application_draws_candidates
+                );
+                list.Show(false)?;
+                assert!(
+                    service
+                        .shared
+                        .document
+                        .borrow()
+                        .application_draws_candidates
+                );
+                service.present_candidates(
+                    &context,
+                    Some(&CandidateView {
+                        selected: 1,
+                        ..view
+                    }),
+                );
+                assert_eq!(list.GetSelection()?, 1);
+                service.present_candidates(&context, None);
+                assert!(service.candidate_element.borrow().is_none());
+                assert!(manager.GetUIElement(id).is_err());
+                assert!(
+                    !service
+                        .shared
+                        .document
+                        .borrow()
+                        .application_draws_candidates
+                );
                 thread.Deactivate()?;
                 Ok(())
             })();
