@@ -282,7 +282,13 @@ impl CandidateWindow {
                 window
             }
         };
-        let dpi = unsafe { GetDpiForWindow(window) }.max(1);
+        // The window takes the DPI of the monitor it moves to only after the
+        // move, so it is sized for the application window it belongs to.
+        let dpi = [parent, window]
+            .into_iter()
+            .map(|owner| unsafe { GetDpiForWindow(owner) })
+            .find(|dpi| *dpi > 0)
+            .unwrap_or(DEFAULT_DPI as u32);
         self.use_font(dpi);
         let selection_changed = {
             let mut list = self.data.list.borrow_mut();
