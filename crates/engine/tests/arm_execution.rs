@@ -45,6 +45,20 @@ fn stops_a_guest_that_does_not_return() {
 }
 
 #[test]
+fn calls_are_not_slowed_by_the_timeout() {
+    let mut machine = ArmMachine::new().unwrap();
+    machine.map(0x1000, 4096).unwrap();
+    machine
+        .write(0x1000, &[0x01, 0x00, 0x80, 0xe0, 0x1e, 0xff, 0x2f, 0xe1])
+        .unwrap();
+    let start = std::time::Instant::now();
+    for _ in 0..100 {
+        machine.call(0x1000, &[1, 2]).unwrap();
+    }
+    assert!(start.elapsed() < std::time::Duration::from_millis(500));
+}
+
+#[test]
 fn passes_fifth_argument_on_the_guest_stack() {
     let mut machine = ArmMachine::new().unwrap();
     machine.map(0x1000, 4096).unwrap();

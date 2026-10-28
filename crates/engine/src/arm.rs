@@ -1,6 +1,7 @@
 //! Bounded ARM32 execution. Guest addresses never become host pointers.
 
-use crate::EngineError;
+use crate::{EngineError, watchdog::Watchdog};
+use std::time::Duration;
 use unicorn_engine::{
     RegisterARM, Unicorn,
     unicorn_const::{Arch, Mode, Prot},
@@ -25,6 +26,7 @@ const VFP_ENABLED: u64 = 0x4000_0000;
 
 /// A single-threaded guest machine with a private stack and bounded calls.
 pub struct ArmMachine {
+    watchdog: Watchdog,
     pub(crate) guest: Guest<'static>,
 }
 
@@ -39,7 +41,10 @@ impl ArmMachine {
             PAGE_SIZE,
             Prot::EXEC | Prot::READ,
         )?;
-        Ok(Self { guest })
+        Ok(Self {
+            watchdog: Watchdog::new(guest.get_handle()),
+            guest,
+        })
     }
 
     pub fn map(&mut self, address: u64, size: u64) -> Result<(), EngineError> {
@@ -104,12 +109,12 @@ impl ArmMachine {
         for (index, argument) in arguments.iter().skip(registers.len()).enumerate() {
             self.write(stack_top + (index * 4) as u64, &argument.to_le_bytes())?;
         }
-        self.guest.emu_start(
-            u64::from(address),
-            RETURN_ADDRESS,
-            timeout_us,
-            instruction_limit,
-        )?;
+        self.watchdog.arm(Duration::from_micros(timeout_us));
+        let run = self
+            .guest
+            .emu_start(u64::from(address), RETURN_ADDRESS, 0, instruction_limit);
+        self.watchdog.disarm();
+        run?;
         let pc = self.guest.reg_read(RegisterARM::PC)?;
         if pc != RETURN_ADDRESS {
             return Err(EngineError::new(format!(
@@ -151,4 +156,31 @@ pub(crate) fn read_c_string(guest: &Guest<'_>, address: u32) -> Result<Vec<u8>, 
         text.extend_from_slice(&block);
     }
     Err(EngineError::new("Unterminated guest string"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn the_deadline_stops_an_endless_guest_loop() {
+        let mut machine = ArmMachine::new().unwrap();
+        machine.map(0x1000, 4096).unwrap();
+        // b .
+        machine.write(0x1000, &[0xfe, 0xff, 0xff, 0xea]).unwrap();
+        let start = Instant::now();
+        assert!(machine.call_with_limits(0x1000, &[], 50_000, 0).is_err());
+        assert!(start.elapsed() < Duration::from_secs(2));
+        // add r0, r0, r1; bx lr
+        machine
+            .write(0x1100, &[0x01, 0x00, 0x80, 0xe0, 0x1e, 0xff, 0x2f, 0xe1])
+            .unwrap();
+        assert_eq!(
+            machine
+                .call_with_limits(0x1100, &[2, 3], 50_000, 0)
+                .unwrap(),
+            5
+        );
+    }
 }
