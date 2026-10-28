@@ -4,7 +4,7 @@
 use crate::{
     candidate_window::CandidateWindow,
     cloud_timer::CloudTimer,
-    composer::{Composer, Effect},
+    composer::{Composer, Effect, Learning},
     display_attributes::{self, AttributeAtoms},
     dll::DllRef,
     edit_session::{Edit, EditSession},
@@ -93,44 +93,66 @@ impl TextService_Impl {
         let Some(key) = keys::classify(vk, Modifiers::current()) else {
             return Ok(false.into());
         };
+        let before = self.shared.composer.borrow().clone();
         let handled = self.shared.composer.borrow_mut().press(
             key,
             || keys::typed_text(vk, lparam),
             &mut Worker,
         );
-        // A worker failure can follow a commit made earlier in the same key;
-        // that commit still has to reach the document.
-        self.apply_effects(context)?;
+        // Effects queued before a worker failure, such as a commit, still
+        // have to reach the document.
+        let (applied, result) = self.apply_effects(context);
+        if applied == 0 && (handled.is_err() || result.is_err()) {
+            // The document did not change, so neither does the composition.
+            *self.shared.composer.borrow_mut() = before;
+        }
+        result?;
         Ok(handled?.into())
     }
 
-    fn apply_effects(&self, context: &ITfContext) -> Result<()> {
+    /// Applies the queued effects in order and returns how many succeeded.
+    fn apply_effects(&self, context: &ITfContext) -> (usize, Result<()>) {
         let effects = self.shared.composer.borrow_mut().take_effects();
-        for effect in effects {
-            match effect {
-                Effect::Show(view) => self.request_edit(context, Edit::Show(view))?,
-                Effect::Commit { text, learn } => {
-                    let learned = learn.filter(|_| self.shared.document.borrow().public_field);
-                    self.request_edit(context, Edit::Finish(text))?;
-                    if let Some(candidate) = learned {
-                        // Stay on the COM apartment thread: a detached thread
-                        // could still run this DLL after COM unloaded it.
-                        Worker.learn(candidate);
-                    }
-                }
-                Effect::Cancel => self.request_edit(context, Edit::Finish(String::new()))?,
-                Effect::QueueCloud(reading) => {
-                    let reading = if self.shared.document.borrow().public_field {
-                        reading
-                    } else {
-                        String::new()
-                    };
-                    let enabled = Worker.queue_cloud(reading);
-                    self.shared.composer.borrow_mut().set_cloud_enabled(enabled);
-                }
+        let count = effects.len();
+        for (applied, effect) in effects.into_iter().enumerate() {
+            if let Err(error) = self.apply_effect(context, effect) {
+                return (applied, Err(error));
             }
         }
-        Ok(())
+        (count, Ok(()))
+    }
+
+    fn apply_effect(&self, context: &ITfContext, effect: Effect) -> Result<()> {
+        match effect {
+            Effect::Show(view) => self.request_edit(context, Edit::Show(view)),
+            Effect::Commit { text, learn } => {
+                let public = self.shared.document.borrow().public_field;
+                self.request_edit(context, Edit::Finish(text))?;
+                if public {
+                    // Stay on the COM apartment thread: a detached thread
+                    // could still run this DLL after COM unloaded it.
+                    for Learning {
+                        candidate,
+                        previous,
+                    } in learn
+                    {
+                        Worker.learn(candidate, previous);
+                    }
+                }
+                Ok(())
+            }
+            Effect::Cancel => self.request_edit(context, Edit::Finish(String::new())),
+            Effect::QueueCloud(reading) => {
+                let reading = if self.shared.document.borrow().public_field {
+                    reading
+                } else {
+                    String::new()
+                };
+                let enabled = Worker.queue_cloud(reading);
+                self.shared.composer.borrow_mut().set_cloud_enabled(enabled);
+                Ok(())
+            }
+        }
     }
 
     /// Finishes a composition left in another document before handling a

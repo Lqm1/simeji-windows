@@ -30,8 +30,9 @@ impl CandidateWindow {
 
     /// Shows `page` below `composition`, creating the window on first use.
     pub fn show(&mut self, parent: HWND, composition: RECT, page: &Page) -> Result<()> {
-        let text = HSTRING::from(Self::format_page(page));
-        let rows = page.total.min(PAGE_SIZE) as i32;
+        let lines = Self::format_page(page);
+        let rows = lines.len() as i32;
+        let text = HSTRING::from(lines.join("\r\n"));
         unsafe {
             let window = match self.window {
                 Some(window) => window,
@@ -55,8 +56,11 @@ impl CandidateWindow {
         Ok(())
     }
 
-    fn format_page(page: &Page) -> String {
-        page.items
+    /// One numbered line per candidate, and the position among all of them
+    /// when they span several pages.
+    fn format_page(page: &Page) -> Vec<String> {
+        let mut lines = page
+            .items
             .iter()
             .enumerate()
             .map(|(index, text)| {
@@ -68,8 +72,11 @@ impl CandidateWindow {
                     .collect::<String>();
                 format!("{marker} {}  {text}", index + 1)
             })
-            .collect::<Vec<_>>()
-            .join("\r\n")
+            .collect::<Vec<_>>();
+        if page.total > PAGE_SIZE {
+            lines.push(format!("      {}/{}", page.index + 1, page.total));
+        }
+        lines
     }
 
     /// A topmost tool window that never takes focus from the application.
@@ -120,12 +127,15 @@ mod tests {
         let page = Page {
             items: vec!["今日".into(), "京\n".into(), "あ".repeat(40)],
             selected: 1,
-            total: 10,
+            index: 10,
+            total: 12,
         };
         let lines = CandidateWindow::format_page(&page);
-        let lines = lines.split("\r\n").collect::<Vec<_>>();
         assert_eq!(lines[0], "   1  今日");
         assert_eq!(lines[1], "▶ 2  京 ");
         assert_eq!(lines[2], format!("   3  {}", "あ".repeat(MAX_CHARACTERS)));
+        assert_eq!(lines[3], "      11/12");
+        let single = Page { total: 3, ..page };
+        assert_eq!(CandidateWindow::format_page(&single).len(), 3);
     }
 }

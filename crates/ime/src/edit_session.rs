@@ -111,10 +111,19 @@ impl EditSession {
         Ok(())
     }
 
-    fn place_caret_at_end(&self, cookie: u32, range: &ITfRange) -> Result<()> {
+    /// Places the caret `offset` UTF-16 units into `range`, or at its end.
+    fn place_caret(&self, cookie: u32, range: &ITfRange, offset: Option<usize>) -> Result<()> {
         unsafe {
             let caret = range.Clone()?;
-            caret.Collapse(cookie, TF_ANCHOR_END)?;
+            match offset {
+                Some(offset) => {
+                    let mut shifted = 0;
+                    caret.Collapse(cookie, TF_ANCHOR_START)?;
+                    caret.ShiftEnd(cookie, offset as i32, &mut shifted, std::ptr::null())?;
+                    caret.ShiftStart(cookie, offset as i32, &mut shifted, std::ptr::null())?;
+                }
+                None => caret.Collapse(cookie, TF_ANCHOR_END)?,
+            }
             let mut selection = TF_SELECTION {
                 range: ManuallyDrop::new(Some(caret)),
                 style: TF_SELECTIONSTYLE {
@@ -172,7 +181,11 @@ impl ITfEditSession_Impl for EditSession_Impl {
             if let Edit::Show(view) = &self.edit {
                 self.underline(cookie, &attributes, &range, view)?;
             }
-            self.place_caret_at_end(cookie, &range)?;
+            let caret = match &self.edit {
+                Edit::Show(view) => Some(view.caret),
+                Edit::Finish(_) => None,
+            };
+            self.place_caret(cookie, &range, caret)?;
             match &self.edit {
                 Edit::Show(view) => self.show_candidates(cookie, &range, view)?,
                 Edit::Finish(_) => {

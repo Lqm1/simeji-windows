@@ -30,6 +30,9 @@ fn converts_readings_with_the_bundled_dictionary() {
     let data = TestData::new();
     let mut engine = data.open();
     assert_eq!(engine.transliterate("nihongo").unwrap(), "にほんご");
+    // The composer keeps kana left of the caret and appends romaji to it.
+    assert_eq!(engine.transliterate("きゃku").unwrap(), "きゃく");
+    assert_eq!(engine.transliterate("nihon").unwrap(), "にほn");
     for (reading, expected) in [
         ("にほんご", "日本語"),
         ("とうきょう", "東京"),

@@ -8,16 +8,26 @@ pub(crate) enum Key {
     ToggleInputMode,
     Enter,
     Escape,
-    /// Shift+Space selects the previous candidate.
     Space {
-        reverse: bool,
+        shift: bool,
     },
     Backspace,
-    Left,
-    Right,
-    Up,
-    Down,
-    /// A key that types a character. The number keys 1–7 also select the
+    Delete,
+    Left {
+        shift: bool,
+    },
+    Right {
+        shift: bool,
+    },
+    Up {
+        shift: bool,
+    },
+    Down {
+        shift: bool,
+    },
+    Home,
+    End,
+    /// A key that types a character. The number keys 1–9 also select the
     /// candidate with that number on the shown page.
     Printable {
         candidate_number: Option<usize>,
@@ -56,6 +66,7 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     const OEM_AUTO: u32 = vk_code(VK_OEM_AUTO);
     const OEM_ENLW: u32 = vk_code(VK_OEM_ENLW);
     const BACK: u32 = vk_code(VK_BACK);
+    const DELETE: u32 = vk_code(VK_DELETE);
     const RETURN: u32 = vk_code(VK_RETURN);
     const ESCAPE: u32 = vk_code(VK_ESCAPE);
     const SPACE: u32 = vk_code(VK_SPACE);
@@ -63,9 +74,10 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     const UP: u32 = vk_code(VK_UP);
     const RIGHT: u32 = vk_code(VK_RIGHT);
     const DOWN: u32 = vk_code(VK_DOWN);
+    const HOME: u32 = vk_code(VK_HOME);
+    const END: u32 = vk_code(VK_END);
     const DIGIT_0: u32 = vk_code(VK_0);
     const DIGIT_1: u32 = vk_code(VK_1);
-    const DIGIT_7: u32 = vk_code(VK_7);
     const DIGIT_9: u32 = vk_code(VK_9);
     const LETTER_A: u32 = vk_code(VK_A);
     const LETTER_Z: u32 = vk_code(VK_Z);
@@ -75,6 +87,8 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     // [{ \| ]} ^~ on the JIS layout.
     const OEM_4: u32 = vk_code(VK_OEM_4);
     const OEM_7: u32 = vk_code(VK_OEM_7);
+    // \_ (ろ) on the JIS layout.
+    const OEM_102: u32 = vk_code(VK_OEM_102);
 
     if matches!(vk, KANJI | OEM_AUTO | OEM_ENLW) {
         return Some(Key::ToggleInputMode);
@@ -82,22 +96,26 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     if modifiers.control || modifiers.alt || modifiers.windows {
         return None;
     }
+    let shift = modifiers.shift;
     Some(match vk {
         RETURN => Key::Enter,
         ESCAPE => Key::Escape,
-        SPACE => Key::Space {
-            reverse: modifiers.shift,
-        },
+        SPACE => Key::Space { shift },
         BACK => Key::Backspace,
-        LEFT => Key::Left,
-        RIGHT => Key::Right,
-        UP => Key::Up,
-        DOWN => Key::Down,
-        DIGIT_0..=DIGIT_9 | LETTER_A..=LETTER_Z | OEM_1..=OEM_3 | OEM_4..=OEM_7 => Key::Printable {
-            candidate_number: (DIGIT_1..=DIGIT_7)
-                .contains(&vk)
-                .then(|| (vk - DIGIT_0) as usize),
-        },
+        DELETE => Key::Delete,
+        LEFT => Key::Left { shift },
+        RIGHT => Key::Right { shift },
+        UP => Key::Up { shift },
+        DOWN => Key::Down { shift },
+        HOME => Key::Home,
+        END => Key::End,
+        DIGIT_0..=DIGIT_9 | LETTER_A..=LETTER_Z | OEM_1..=OEM_3 | OEM_4..=OEM_7 | OEM_102 => {
+            Key::Printable {
+                candidate_number: (DIGIT_1..=DIGIT_9)
+                    .contains(&vk)
+                    .then(|| (vk - DIGIT_0) as usize),
+            }
+        }
         _ => return None,
     })
 }
@@ -134,6 +152,10 @@ mod tests {
         alt: false,
         windows: false,
     };
+    const SHIFT: Modifiers = Modifiers {
+        shift: true,
+        ..NONE
+    };
 
     #[test]
     fn toggles_input_even_with_modifiers() {
@@ -166,31 +188,36 @@ mod tests {
     }
 
     #[test]
-    fn classifies_editing_keys() {
+    fn classifies_editing_keys_with_shift() {
         assert_eq!(classify(0x0d, NONE), Some(Key::Enter));
         assert_eq!(classify(0x1b, NONE), Some(Key::Escape));
         assert_eq!(classify(0x08, NONE), Some(Key::Backspace));
-        assert_eq!(classify(0x20, NONE), Some(Key::Space { reverse: false }));
-        let shift = Modifiers {
-            shift: true,
-            ..NONE
-        };
-        assert_eq!(classify(0x20, shift), Some(Key::Space { reverse: true }));
+        assert_eq!(classify(0x2e, NONE), Some(Key::Delete));
+        assert_eq!(classify(0x24, NONE), Some(Key::Home));
+        assert_eq!(classify(0x23, NONE), Some(Key::End));
+        assert_eq!(classify(0x20, SHIFT), Some(Key::Space { shift: true }));
         assert_eq!(
             [0x25, 0x26, 0x27, 0x28].map(|vk| classify(vk, NONE)),
-            [Key::Left, Key::Up, Key::Right, Key::Down].map(Some)
+            [
+                Key::Left { shift: false },
+                Key::Up { shift: false },
+                Key::Right { shift: false },
+                Key::Down { shift: false },
+            ]
+            .map(Some)
         );
+        assert_eq!(classify(0x25, SHIFT), Some(Key::Left { shift: true }));
     }
 
     #[test]
-    fn number_keys_one_to_seven_select_candidates() {
+    fn number_keys_one_to_nine_select_candidates() {
         assert_eq!(
             classify(u32::from(b'0'), NONE),
             Some(Key::Printable {
                 candidate_number: None
             })
         );
-        for number in 1..=7 {
+        for number in 1..=9 {
             assert_eq!(
                 classify(u32::from(b'0') + number, NONE),
                 Some(Key::Printable {
@@ -198,19 +225,19 @@ mod tests {
                 })
             );
         }
-        for vk in *b"89" {
-            assert_eq!(
-                classify(u32::from(vk), NONE),
-                Some(Key::Printable {
-                    candidate_number: None
-                })
-            );
-        }
     }
 
     #[test]
     fn letters_and_punctuation_are_printable() {
-        for vk in [u32::from(b'A'), u32::from(b'Z'), 0xba, 0xc0, 0xdb, 0xde] {
+        for vk in [
+            u32::from(b'A'),
+            u32::from(b'Z'),
+            0xba,
+            0xc0,
+            0xdb,
+            0xde,
+            0xe2,
+        ] {
             assert_eq!(
                 classify(vk, NONE),
                 Some(Key::Printable {
@@ -218,7 +245,7 @@ mod tests {
                 })
             );
         }
-        for vk in [0x70, 0x24, 0x2e, 0xc1, 0xe2] {
+        for vk in [0x70, 0x21, 0x22, 0xc1] {
             assert_eq!(classify(vk, NONE), None);
         }
     }

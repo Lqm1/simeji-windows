@@ -2,8 +2,8 @@
 
 use simeji_protocol::{Candidate, CloudCandidate};
 
-/// Candidates per page of the candidate window, numbered 1–7.
-pub(crate) const PAGE_SIZE: usize = 7;
+/// Candidates per page of the candidate window, numbered 1–9.
+pub(crate) const PAGE_SIZE: usize = 9;
 /// Cloud sentences placed right after the engine's first candidate; any
 /// further ones follow the engine candidates.
 const LEADING_CLOUD_SENTENCES: usize = 6;
@@ -20,11 +20,12 @@ pub(crate) struct Page {
     pub items: Vec<String>,
     /// Index of the selected candidate within `items`.
     pub selected: usize,
-    /// Number of candidates on all pages.
+    /// Index of the selected candidate among all candidates.
+    pub index: usize,
     pub total: usize,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct CandidateList {
     choices: Vec<Choice>,
     selected: usize,
@@ -101,6 +102,19 @@ impl CandidateList {
         self.selected()
     }
 
+    /// Moves by `step` pages, wrapping around, at the same place on the page.
+    pub fn move_page(&mut self, step: isize) -> Option<&Choice> {
+        let count = self.choices.len();
+        if count == 0 {
+            return None;
+        }
+        let pages = count.div_ceil(PAGE_SIZE) as isize;
+        let page = (self.page_start() / PAGE_SIZE) as isize;
+        let target = (page + step).rem_euclid(pages) as usize * PAGE_SIZE;
+        self.selected = (target + self.selected % PAGE_SIZE).min(count - 1);
+        self.selected()
+    }
+
     /// Selects the candidate shown with `number` (1-based) on the current page.
     pub fn select_number(&mut self, number: usize) -> Option<&Choice> {
         let index = self.page_start() + number.checked_sub(1)?;
@@ -123,6 +137,7 @@ impl CandidateList {
                 .map(|choice| choice.candidate.text.clone())
                 .collect(),
             selected: self.selected - start,
+            index: self.selected,
             total: self.choices.len(),
         })
     }
@@ -213,24 +228,28 @@ mod tests {
     }
 
     #[test]
-    fn steps_wrap_and_numbers_pick_on_the_current_page() {
-        let engine = (0..10).map(|n| candidate(&n.to_string())).collect();
+    fn steps_and_pages_wrap_and_numbers_pick_on_the_current_page() {
+        let engine = (0..20).map(|n| candidate(&n.to_string())).collect();
         let mut list = CandidateList::new(engine, &[], "reading", "0");
-        assert_eq!(list.move_selection(-1).unwrap().candidate.text, "9");
+        assert_eq!(list.move_selection(-1).unwrap().candidate.text, "19");
         assert_eq!(
             list.page(),
             Some(Page {
-                items: vec!["7".into(), "8".into(), "9".into()],
-                selected: 2,
-                total: 10,
+                items: vec!["18".into(), "19".into()],
+                selected: 1,
+                index: 19,
+                total: 20,
             })
         );
-        assert_eq!(list.select_number(1).unwrap().candidate.text, "7");
-        assert!(list.select_number(4).is_none());
-        assert_eq!(list.move_selection(1).unwrap().candidate.text, "8");
+        assert_eq!(list.select_number(1).unwrap().candidate.text, "18");
+        assert!(list.select_number(3).is_none());
         assert_eq!(list.move_selection(2).unwrap().candidate.text, "0");
-        assert_eq!(list.select_number(7).unwrap().candidate.text, "6");
+        assert_eq!(list.select_number(9).unwrap().candidate.text, "8");
         assert_eq!(list.page().unwrap().items.len(), PAGE_SIZE);
+        assert_eq!(list.move_page(1).unwrap().candidate.text, "17");
+        assert_eq!(list.move_page(1).unwrap().candidate.text, "19");
+        assert_eq!(list.move_page(1).unwrap().candidate.text, "1");
+        assert_eq!(list.move_page(-1).unwrap().candidate.text, "19");
     }
 
     #[test]
@@ -238,6 +257,7 @@ mod tests {
         let mut list = CandidateList::default();
         assert!(list.page().is_none());
         assert!(list.move_selection(1).is_none());
+        assert!(list.move_page(1).is_none());
         assert!(list.select_number(1).is_none());
     }
 }

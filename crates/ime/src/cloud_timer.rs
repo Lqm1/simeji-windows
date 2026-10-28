@@ -61,7 +61,7 @@ unsafe extern "system" fn poll_cloud(_window: HWND, _message: u32, id: usize, _t
     }
     let reading = match shared.composer.try_borrow() {
         Ok(composer) => match composer.cloud_lookup_reading() {
-            Some(reading) => reading.to_owned(),
+            Some(reading) => reading,
             None => return,
         },
         Err(_) => return,
