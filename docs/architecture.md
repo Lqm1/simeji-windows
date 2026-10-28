@@ -40,7 +40,7 @@ TSFに依存しない層:
 TSF・COMとの接続層:
 
 - `dll`: DLLエントリポイント、クラスファクトリ、アンロード判定。
-- `text_service`: `ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfCompartmentEventSink` などの実装。キーを `composer` に渡し、返された操作を編集セッションで文書へ適用する。確定時の学習とクラウド照会は、入力スコープが許す場合だけ行う。
+- `text_service`: `ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfCompartmentEventSink` などの実装。キーを `composer` に渡し、返された操作を編集セッションで文書へ適用する。確定時の学習とクラウド照会は、入力スコープが許す場合だけ行う。入力スコープは、Microsoftの資料どおりアプリのプロパティ（`ITfContext::GetAppProperty`）として読む。
 - `input_mode`、`mode_icon`: 日本語入力のオン・オフをTSFのコンパートメント（`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`）で管理する。アプリ・入力インジケーター・タッチキーボードからの変更にも従い、オフにすると入力中の文字を確定する。入力インジケーターには `GUID_LBI_INPUTMODE` のボタンとして「あ」「A」のアイコン（実行時に描画）を表示し、クリックで切り替える。有効化時は日本語入力をオンにする。
 - `edit_session`: 未確定文字の書き込み、表示属性、キャレット、候補ウィンドウの位置。
 - `candidate_window`: アプリのウィンドウに所有される独自クラスのウィンドウ。システムの配色で描き、選択中の候補を強調する。モニターのDPIに合わせて拡大し、表示・移動・非表示を `EVENT_OBJECT_IME_SHOW`・`EVENT_OBJECT_IME_CHANGE`・`EVENT_OBJECT_IME_HIDE` で通知する。クラス名にモジュールのアドレスを含め、別のアドレスで読み込まれた以前のDLLのクラスを使わない。

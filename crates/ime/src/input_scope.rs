@@ -26,7 +26,7 @@ pub(crate) fn is_public_field(context: &ITfContext, cookie: u32, range: &ITfRang
 fn scopes_allow(context: &ITfContext, cookie: u32, range: &ITfRange) -> Result<bool> {
     unsafe {
         let value = context
-            .GetProperty(&GUID_PROP_INPUTSCOPE)?
+            .GetAppProperty(&GUID_PROP_INPUTSCOPE)?
             .GetValue(cookie, range)?;
         if value.is_empty() {
             return Ok(true);
