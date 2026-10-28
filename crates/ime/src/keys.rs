@@ -7,6 +7,9 @@ pub(crate) enum Key {
     /// 半角/全角 or 漢字: switches Japanese input on and off.
     ToggleInputMode,
     Enter,
+    Tab {
+        shift: bool,
+    },
     Escape,
     Space {
         shift: bool,
@@ -72,6 +75,7 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     const BACK: u32 = vk_code(VK_BACK);
     const DELETE: u32 = vk_code(VK_DELETE);
     const RETURN: u32 = vk_code(VK_RETURN);
+    const TAB: u32 = vk_code(VK_TAB);
     const ESCAPE: u32 = vk_code(VK_ESCAPE);
     const SPACE: u32 = vk_code(VK_SPACE);
     const LEFT: u32 = vk_code(VK_LEFT);
@@ -105,6 +109,7 @@ pub(crate) fn classify(vk: u32, modifiers: Modifiers) -> Option<Key> {
     let shift = modifiers.shift;
     Some(match vk {
         RETURN => Key::Enter,
+        TAB => Key::Tab { shift },
         ESCAPE => Key::Escape,
         SPACE => Key::Space { shift },
         BACK => Key::Backspace,

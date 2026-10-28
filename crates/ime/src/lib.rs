@@ -14,14 +14,13 @@
 //!   composer's effects through `edit_session`, plus `display_attributes`,
 //!   the `candidate_window` and the `candidate_element` for applications
 //!   that draw candidates themselves, `functions` for the touch keyboard
-//!   and search, `input_scope` checks, the `cloud_timer` and
-//!   [`registration`] for `simeji-setup`.
+//!   and search, `input_scope` checks, the `lookup_timer` that collects
+//!   background results, and [`registration`] for `simeji-setup`.
 
 mod candidate_accessibility;
 mod candidate_element;
 mod candidate_window;
 mod candidates;
-mod cloud_timer;
 mod composer;
 mod display_attributes;
 mod dll;
@@ -30,6 +29,7 @@ mod functions;
 mod input_mode;
 mod input_scope;
 mod keys;
+mod lookup_timer;
 mod mode_icon;
 pub mod registration;
 mod text_service;

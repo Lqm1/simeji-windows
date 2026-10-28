@@ -2,7 +2,7 @@
 
 use simeji_protocol::{Candidate, CloudCandidate};
 
-/// Candidates per page of the candidate window, numbered 1–9.
+/// Up to nine numbered rows, as in the expanded Microsoft IME list.
 pub(crate) const PAGE_SIZE: usize = 9;
 /// Cloud sentences placed right after the engine's first candidate; any
 /// further ones follow the engine candidates.
@@ -19,6 +19,10 @@ pub(crate) struct Choice {
 pub(crate) struct CandidateView {
     pub texts: Vec<String>,
     pub selected: usize,
+    /// Parallel to `texts`; never put the source marker into committed text.
+    pub cloud: Vec<bool>,
+    /// Suggestions are visible before keyboard selection enters the list.
+    pub selecting: bool,
 }
 
 impl CandidateView {
@@ -98,6 +102,10 @@ impl CandidateList {
         self.choices.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.choices.len()
+    }
+
     pub fn clear(&mut self) {
         self.choices.clear();
         self.selected = 0;
@@ -130,6 +138,9 @@ impl CandidateList {
 
     /// Selects the candidate shown with `number` (1-based) on the current page.
     pub fn select_number(&mut self, number: usize) -> Option<&Choice> {
+        if number == 0 || number > PAGE_SIZE {
+            return None;
+        }
         let index = self.page_start() + number.checked_sub(1)?;
         if index >= self.choices.len() {
             return None;
@@ -155,7 +166,27 @@ impl CandidateList {
                 .map(|choice| choice.candidate.text.clone())
                 .collect(),
             selected: self.selected,
+            cloud: self
+                .choices
+                .iter()
+                .map(|choice| choice.whole_sentence)
+                .collect(),
+            selecting: true,
         })
+    }
+
+    /// Append late cloud results without shifting a user's current choice.
+    pub fn append_cloud(&mut self, cloud: &[CloudCandidate], reading: &str) {
+        let additions = Self::new(Vec::new(), cloud, reading, "");
+        for choice in additions.choices {
+            if !self
+                .choices
+                .iter()
+                .any(|existing| existing.candidate.text == choice.candidate.text)
+            {
+                self.choices.push(choice);
+            }
+        }
     }
 
     fn page_start(&self) -> usize {

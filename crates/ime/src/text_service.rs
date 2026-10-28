@@ -5,7 +5,6 @@ use crate::{
     candidate_element::{CandidateElement, Handler, Request},
     candidate_window::CandidateWindow,
     candidates::CandidateView,
-    cloud_timer::CloudTimer,
     composer::{Composer, Effect, InputMode, Learning},
     display_attributes::{self, AttributeAtoms},
     dll::DllRef,
@@ -13,6 +12,7 @@ use crate::{
     functions::Functions,
     input_mode::{self, InputModeButton},
     keys::{self, Key, Modifiers},
+    lookup_timer::LookupTimer,
     worker::Worker,
 };
 use std::{
@@ -24,7 +24,7 @@ use windows::{
     core::*,
 };
 
-/// State shared by the text service, its edit sessions and the cloud timer.
+/// State shared by the text service, its edit sessions and the lookup timer.
 ///
 /// TSF calls back into the service while it applies edits, so neither cell
 /// is borrowed across a call into TSF or the worker.
@@ -49,6 +49,18 @@ impl Document {
         self.composition = None;
         self.public_field = false;
         self.candidate_window.hide();
+        self.candidate_window.clear_anchor();
+    }
+
+    /// Shows the candidates in the window unless the application draws them.
+    pub fn show_candidates(&mut self, view: Option<&CandidateView>) -> Result<()> {
+        match view {
+            Some(view) if !self.application_draws_candidates => self.candidate_window.show(view),
+            _ => {
+                self.candidate_window.hide();
+                Ok(())
+            }
+        }
     }
 }
 
@@ -79,7 +91,7 @@ pub(crate) struct TextService {
     thread_manager: RefCell<Option<ITfThreadMgr>>,
     client_id: Cell<u32>,
     atoms: Cell<AttributeAtoms>,
-    cloud_timer: RefCell<Option<CloudTimer>>,
+    lookup_timer: RefCell<Option<LookupTimer>>,
     input_mode: RefCell<Option<InputModeState>>,
     ui_elements: RefCell<Option<ITfUIElementMgr>>,
     candidate_element: RefCell<Option<CandidateElementState>>,
@@ -96,7 +108,7 @@ impl TextService {
             thread_manager: RefCell::new(None),
             client_id: Cell::new(0),
             atoms: Cell::new(AttributeAtoms::default()),
-            cloud_timer: RefCell::new(None),
+            lookup_timer: RefCell::new(None),
             input_mode: RefCell::new(None),
             ui_elements: RefCell::new(None),
             candidate_element: RefCell::new(None),
@@ -352,6 +364,14 @@ impl TextService_Impl {
                 self.present_candidates(context, view.candidates.as_ref());
                 self.request_edit(context, Edit::Show(view))
             }
+            // The composition is unchanged, so no edit session is needed.
+            Effect::Candidates(view) => {
+                self.present_candidates(context, view.as_ref());
+                self.shared
+                    .document
+                    .borrow_mut()
+                    .show_candidates(view.as_ref())
+            }
             Effect::Commit { text, learn } => {
                 self.end_candidate_element();
                 let public = self.shared.document.borrow().public_field;
@@ -373,14 +393,16 @@ impl TextService_Impl {
                 self.end_candidate_element();
                 self.request_edit(context, Edit::Finish(String::new()))
             }
-            Effect::QueueCloud(reading) => {
-                let reading = if self.shared.document.borrow().public_field {
-                    reading
-                } else {
-                    String::new()
-                };
-                let enabled = Worker.queue_cloud(reading);
-                self.shared.composer.borrow_mut().set_cloud_enabled(enabled);
+            Effect::Lookup(reading) => {
+                let public = self.shared.document.borrow().public_field;
+                let enabled = Worker.start_lookup(reading, public);
+                self.shared
+                    .composer
+                    .borrow_mut()
+                    .set_cloud_enabled(enabled && public);
+                if let Some(timer) = self.lookup_timer.borrow().as_ref() {
+                    timer.start();
+                }
                 Ok(())
             }
         }
@@ -426,7 +448,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
     }
 
     fn Deactivate(&self) -> Result<()> {
-        self.cloud_timer.borrow_mut().take();
+        self.lookup_timer.borrow_mut().take();
         let thread = self.thread_manager.borrow_mut().take();
         self.reset();
         self.ui_elements.borrow_mut().take();
@@ -455,7 +477,26 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
         *self.thread_manager.borrow_mut() = Some(thread.clone());
         *self.ui_elements.borrow_mut() = thread.cast().ok();
         Self::advise_functions(thread, client);
-        *self.cloud_timer.borrow_mut() = CloudTimer::start(&self.shared);
+        let handler = self.element_handler();
+        self.shared
+            .document
+            .borrow_mut()
+            .candidate_window
+            .set_action(Rc::new(move |action| {
+                let _ = handler(Request::Act(action));
+            }));
+        let service = self.to_interface::<ITfKeyEventSink>().downgrade().ok();
+        *self.lookup_timer.borrow_mut() = Some(LookupTimer::new(
+            &self.shared,
+            Box::new(move || {
+                if let Some(service) = service.as_ref().and_then(Weak::upgrade)
+                    && let Ok(service) = ComObject::<TextService>::cast_from(&service)
+                    && let Some(context) = service.composition_context()
+                {
+                    let _ = service.apply_effects(&context);
+                }
+            }),
+        ));
         self.activate_input_mode(thread, client)
     }
 }
@@ -519,7 +560,7 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
                 document.public_field = false;
             }
             self.end_candidate_element();
-            self.shared.composer.borrow_mut().discard_cloud_candidates();
+            self.shared.composer.borrow_mut().forget_lookups();
         }
         Ok(())
     }
@@ -608,6 +649,8 @@ mod tests {
                 let view = CandidateView {
                     texts: vec!["今日".into(), "京".into()],
                     selected: 0,
+                    cloud: Vec::new(),
+                    selecting: true,
                 };
                 service.present_candidates(&context, Some(&view));
                 let id = service.candidate_element.borrow().as_ref().unwrap().id;
