@@ -31,7 +31,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR ('release\' + $name)) -Destination $package.FullName
     }
     Copy-Item -LiteralPath (Join-Path $root 'assets\dictionary') -Destination (Join-Path $package.FullName 'Dictionary') -Recurse
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1'), (Join-Path $PSScriptRoot 'uninstall.ps1'), (Join-Path $root 'README.md') -Destination $package.FullName
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1'), (Join-Path $PSScriptRoot 'uninstall.ps1'), (Join-Path $PSScriptRoot 'migrate-user-data.ps1'), (Join-Path $root 'README.md') -Destination $package.FullName
     & (Join-Path $package.FullName 'simeji-setup.exe') verify (Join-Path $package.FullName 'simeji_ime.dll')
     if ($LASTEXITCODE -ne 0) { throw 'Packaged COM DLL verification failed' }
     Write-Output $package.FullName

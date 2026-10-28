@@ -7,11 +7,12 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Run install.ps1 from an elevated PowerShell of the user who will type with Simeji Windows.'
 }
 $files = @('simeji_ime.dll', 'simeji-worker.exe', 'simeji-launcher.exe', 'simeji-cloud.exe', 'simeji-setup.exe', 'uninstall.ps1', 'README.md')
-foreach ($name in $files + @('Dictionary')) {
+foreach ($name in $files + @('Dictionary', 'migrate-user-data.ps1')) {
     if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $name))) { throw 'Run install.ps1 from a package produced by scripts/build.ps1.' }
 }
 $product = Join-Path $env:ProgramFiles 'SimejiWindows'
 Get-Process -Name 'simeji-worker' -ErrorAction SilentlyContinue | Stop-Process -Force
+& (Join-Path $PSScriptRoot 'migrate-user-data.ps1')
 New-Item -ItemType Directory -Path $product -Force | Out-Null
 Get-ChildItem -LiteralPath $product -Filter '*.replaced' | Remove-Item -Force -ErrorAction SilentlyContinue
 foreach ($name in $files) {
