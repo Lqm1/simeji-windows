@@ -12,10 +12,12 @@
 //! - Windows integration: `dll` holds the DLL entry points and class
 //!   factory, `text_service` the TSF text input processor that applies the
 //!   composer's effects through `edit_session`, plus `display_attributes`,
-//!   the `candidate_window`, `input_scope` checks, the `cloud_timer` and
-//!   [`registration`] for `simeji-setup`.
+//!   the `candidate_window` and the `candidate_element` for applications
+//!   that draw candidates themselves, `input_scope` checks, the
+//!   `cloud_timer` and [`registration`] for `simeji-setup`.
 
 mod candidate_accessibility;
+mod candidate_element;
 mod candidate_window;
 mod candidates;
 mod cloud_timer;

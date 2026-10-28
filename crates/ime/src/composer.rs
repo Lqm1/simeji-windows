@@ -8,7 +8,7 @@
 //! reaches the document.
 
 use crate::{
-    candidates::{CandidateList, Page},
+    candidates::{CandidateList, CandidateView},
     keys::Key,
     worker::{Converter, WorkerError},
 };
@@ -26,7 +26,7 @@ pub(crate) struct CompositionView {
     pub focus: Option<Range<usize>>,
     /// UTF-16 offset within `text`.
     pub caret: usize,
-    pub candidates: Option<Page>,
+    pub candidates: Option<CandidateView>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +47,16 @@ pub(crate) enum Effect {
     Cancel,
     /// Looks up cloud candidates for the reading if the field allows it.
     QueueCloud(String),
+}
+
+/// What an application that shows the candidates itself asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CandidateAction {
+    Select(usize),
+    /// Commits the composition as shown.
+    Commit,
+    /// Closes the candidates and returns to the reading.
+    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -261,6 +271,24 @@ impl Composer {
             self.commit();
         }
         self.mode = mode;
+    }
+
+    pub fn act(&mut self, action: CandidateAction) {
+        match action {
+            CandidateAction::Select(index) => {
+                let selected = self
+                    .conversion
+                    .as_mut()
+                    .is_some_and(|conversion| conversion.candidates.select(index).is_some());
+                if selected {
+                    self.apply_selection();
+                    self.show();
+                }
+            }
+            CandidateAction::Commit if self.is_composing() => self.commit(),
+            CandidateAction::Cancel if self.is_converting() => self.leave_conversion(),
+            _ => {}
+        }
     }
 
     pub fn take_effects(&mut self) -> Vec<Effect> {
@@ -653,7 +681,7 @@ impl Composer {
         self.effects.push(Effect::Show(view));
     }
 
-    fn view(&self) -> CompositionView {
+    pub fn view(&self) -> CompositionView {
         let Some(conversion) = &self.conversion else {
             return CompositionView {
                 text: self.reading(),
@@ -673,7 +701,7 @@ impl Composer {
             text,
             converted: true,
             focus,
-            candidates: conversion.candidates.page(),
+            candidates: conversion.candidates.view(),
         }
     }
 }
@@ -787,12 +815,10 @@ mod tests {
         }
     }
 
-    fn page(items: &[&str], selected: usize) -> Option<Page> {
-        Some(Page {
-            items: items.iter().map(|item| (*item).into()).collect(),
+    fn page(items: &[&str], selected: usize) -> Option<CandidateView> {
+        Some(CandidateView {
+            texts: items.iter().map(|item| (*item).into()).collect(),
             selected,
-            index: selected,
-            total: items.len(),
         })
     }
 
@@ -1198,7 +1224,7 @@ mod tests {
         let view = shown(&mut composer);
         assert_eq!((view.text.as_str(), view.focus), ("今日は晴れ", None));
         assert_eq!(
-            view.candidates.unwrap().items,
+            view.candidates.unwrap().texts,
             ["今日", "今日は晴れ", "京", "強"]
         );
         press(&mut composer, &mut converter, Key::Enter);
@@ -1219,6 +1245,31 @@ mod tests {
         type_text(&mut composer, &mut converter, "kyouha");
         press(&mut composer, &mut converter, SPACE);
         assert_eq!(composer.cloud_lookup_reading(), None);
+    }
+
+    #[test]
+    fn applications_with_their_own_candidate_ui_select_commit_and_cancel() {
+        let (mut composer, mut converter) = converted();
+        press(&mut composer, &mut converter, SPACE);
+        composer.take_effects();
+        composer.act(CandidateAction::Select(2));
+        assert_eq!(shown(&mut composer).text, "強は");
+        composer.act(CandidateAction::Select(9));
+        assert!(composer.take_effects().is_empty());
+        composer.act(CandidateAction::Cancel);
+        assert_eq!(shown(&mut composer), typing("kyouha", 6));
+        composer.act(CandidateAction::Cancel);
+        assert!(composer.take_effects().is_empty());
+        composer.act(CandidateAction::Commit);
+        assert_eq!(
+            composer.take_effects(),
+            [Effect::Commit {
+                text: "kyouha".into(),
+                learn: Vec::new(),
+            }]
+        );
+        composer.act(CandidateAction::Commit);
+        assert!(composer.take_effects().is_empty());
     }
 
     #[test]

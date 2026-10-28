@@ -5,7 +5,7 @@
 
 use crate::{
     candidate_accessibility::{CandidateList, SharedList},
-    candidates::{PAGE_SIZE, Page},
+    candidates::{CandidateView, PAGE_SIZE},
     dll,
 };
 use std::{
@@ -229,7 +229,7 @@ impl CandidateWindow {
     }
 
     /// Shows `page` below `composition`, creating the window on first use.
-    pub fn show(&mut self, parent: HWND, composition: RECT, page: &Page) -> Result<()> {
+    pub fn show(&mut self, parent: HWND, composition: RECT, view: &CandidateView) -> Result<()> {
         let window = match self.window {
             Some(window) => window,
             None => {
@@ -242,16 +242,17 @@ impl CandidateWindow {
         self.use_font(dpi);
         let selection_changed = {
             let mut list = self.data.list.borrow_mut();
-            let items = Self::visible_items(page);
-            let changed = !self.visible || list.items != items || list.selected != page.selected;
+            let items = Self::visible_items(view);
+            let selected = view.selected_on_page();
+            let changed = !self.visible || list.items != items || list.selected != selected;
             list.items = items;
-            list.selected = page.selected;
+            list.selected = selected;
             list.row_height = Self::row_height(dpi);
             list.padding = scale(PADDING, dpi);
             changed
         };
-        *self.data.footer.borrow_mut() = Self::footer(page);
-        let rows = (page.items.len() + usize::from(page.total > PAGE_SIZE)) as i32;
+        *self.data.footer.borrow_mut() = Self::footer(view);
+        let rows = (view.page().len() + usize::from(view.texts.len() > PAGE_SIZE)) as i32;
         let height = rows * Self::row_height(dpi) + 2 * scale(PADDING, dpi);
         unsafe {
             SetWindowPos(
@@ -289,10 +290,10 @@ impl CandidateWindow {
         FONT_POINTS * dpi as i32 / POINTS_PER_INCH
     }
 
-    /// The candidates as shown: at most [`MAX_CHARACTERS`] long, without
-    /// control characters.
-    fn visible_items(page: &Page) -> Vec<String> {
-        page.items
+    /// The candidates of the page as shown: at most [`MAX_CHARACTERS`]
+    /// long, without control characters.
+    fn visible_items(view: &CandidateView) -> Vec<String> {
+        view.page()
             .iter()
             .map(|text| {
                 text.chars()
@@ -304,8 +305,9 @@ impl CandidateWindow {
     }
 
     /// The position among all candidates when they span several pages.
-    fn footer(page: &Page) -> Option<String> {
-        (page.total > PAGE_SIZE).then(|| format!("{}/{}", page.index + 1, page.total))
+    fn footer(view: &CandidateView) -> Option<String> {
+        (view.texts.len() > PAGE_SIZE)
+            .then(|| format!("{}/{}", view.selected + 1, view.texts.len()))
     }
 
     fn use_font(&mut self, dpi: u32) {
@@ -414,12 +416,12 @@ mod tests {
         },
     };
 
-    fn page() -> Page {
-        Page {
-            items: vec!["今日".into(), "京\n".into(), "あ".repeat(40)],
-            selected: 1,
-            index: 10,
-            total: 12,
+    fn page() -> CandidateView {
+        let mut texts = (0..12).map(|n| n.to_string()).collect::<Vec<_>>();
+        texts.splice(9..12, ["今日".into(), "京\n".into(), "あ".repeat(40)]);
+        CandidateView {
+            texts,
+            selected: 10,
         }
     }
 
@@ -431,7 +433,11 @@ mod tests {
             ["今日".to_owned(), "京 ".into(), "あ".repeat(MAX_CHARACTERS)]
         );
         assert_eq!(CandidateWindow::footer(&page).as_deref(), Some("11/12"));
-        assert_eq!(CandidateWindow::footer(&Page { total: 3, ..page }), None);
+        let short = CandidateView {
+            texts: page.page().to_vec(),
+            selected: 1,
+        };
+        assert_eq!(CandidateWindow::footer(&short), None);
     }
 
     /// UI Automation must not query a window from the thread that owns it,

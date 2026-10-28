@@ -13,15 +13,17 @@ use windows::{
 };
 
 /// A keyboard text service with display attributes that works in Windows
-/// Store apps, without COM activation, and shows its input mode through
-/// compartments and the input indicator.
-const CATEGORIES: [&GUID; 6] = [
+/// Store apps, without COM activation, shows its input mode through
+/// compartments and the input indicator, and lets applications draw its
+/// candidates.
+const CATEGORIES: [&GUID; 7] = [
     &GUID_TFCAT_TIP_KEYBOARD,
     &GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
     &GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
     &GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
     &GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
     &GUID_TFCAT_TIPCAP_COMLESS,
+    &GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
 ];
 /// The icon group the input indicator shows for the profile, linked by the
 /// build script; the profile refers to it as the first icon of the DLL.
