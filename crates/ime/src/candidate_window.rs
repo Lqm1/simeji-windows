@@ -1,7 +1,7 @@
-//! The candidate window: a numbered list below the composition, owned by
-//! the application's window, scaled for its DPI, announced with the IME
-//! WinEvents so that light-dismiss surfaces keep it open, and exposed to
-//! UI Automation.
+//! The candidate window: a numbered list next to the composition, owned by
+//! the application's window, scaled for its DPI, kept clear of the touch
+//! keyboard, announced with the IME WinEvents so that light-dismiss surfaces
+//! keep it open, and exposed to UI Automation.
 
 use crate::{
     candidate_accessibility::{CandidateList, SharedList},
@@ -17,6 +17,7 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
+        System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
         UI::{
             Accessibility::{
                 IRawElementProviderSimple, NotifyWinEvent, UIA_EVENT_ID, UIA_MenuClosedEventId,
@@ -25,6 +26,7 @@ use windows::{
                 UiaRootObjectId,
             },
             HiDpi::GetDpiForWindow,
+            Shell::{FrameworkInputPane, IFrameworkInputPane},
             WindowsAndMessaging::*,
         },
     },
@@ -34,7 +36,7 @@ use windows::{
 const DEFAULT_DPI: i32 = 96;
 const WIDTH: i32 = 350;
 const PADDING: i32 = 5;
-const GAP_BELOW_COMPOSITION: i32 = 2;
+const GAP_TO_COMPOSITION: i32 = 2;
 const FONT_POINTS: i32 = 10;
 const POINTS_PER_INCH: i32 = 72;
 /// Rows are this much taller than the font, in percent.
@@ -62,6 +64,7 @@ pub(crate) struct CandidateWindow {
     data: Rc<WindowData>,
     font_dpi: u32,
     visible: bool,
+    input_pane: Option<Option<IFrameworkInputPane>>,
 }
 
 impl Default for CandidateWindow {
@@ -76,7 +79,50 @@ impl Default for CandidateWindow {
             }),
             font_dpi: 0,
             visible: false,
+            input_pane: None,
         }
+    }
+}
+
+/// The window's top-left corner: below the composition, or above it when
+/// the window would leave the work area or cover the touch keyboard.
+fn place(
+    composition: RECT,
+    size: SIZE,
+    gap: i32,
+    work_area: RECT,
+    touch_keyboard: Option<RECT>,
+) -> POINT {
+    let x = composition
+        .left
+        .min(work_area.right - size.cx)
+        .max(work_area.left);
+    let mut lowest = work_area.bottom;
+    if let Some(keyboard) = touch_keyboard
+        && keyboard.left < x + size.cx
+        && x < keyboard.right
+    {
+        lowest = lowest.min(keyboard.top);
+    }
+    let below = composition.bottom + gap;
+    let y = if below + size.cy <= lowest {
+        below
+    } else {
+        (composition.top - gap - size.cy).max(work_area.top)
+    };
+    POINT { x, y }
+}
+
+fn work_area(composition: RECT) -> Option<RECT> {
+    unsafe {
+        let monitor = MonitorFromRect(&composition, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info)
+            .as_bool()
+            .then_some(info.rcWork)
     }
 }
 
@@ -251,15 +297,26 @@ impl CandidateWindow {
         };
         *self.data.footer.borrow_mut() = Self::footer(view);
         let rows = (view.page().len() + usize::from(view.texts.len() > PAGE_SIZE)) as i32;
-        let height = rows * Self::row_height(dpi) + 2 * scale(PADDING, dpi);
+        let size = SIZE {
+            cx: scale(WIDTH, dpi),
+            cy: rows * Self::row_height(dpi) + 2 * scale(PADDING, dpi),
+        };
+        let gap = scale(GAP_TO_COMPOSITION, dpi);
+        let corner = match work_area(composition) {
+            Some(area) => place(composition, size, gap, area, self.touch_keyboard()),
+            None => POINT {
+                x: composition.left,
+                y: composition.bottom + gap,
+            },
+        };
         unsafe {
             SetWindowPos(
                 window,
                 Some(HWND_TOPMOST),
-                composition.left,
-                composition.bottom + scale(GAP_BELOW_COMPOSITION, dpi),
-                scale(WIDTH, dpi),
-                height,
+                corner.x,
+                corner.y,
+                size.cx,
+                size.cy,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             )?;
             let _ = InvalidateRect(Some(window), None, true);
@@ -278,6 +335,14 @@ impl CandidateWindow {
             self.raise_selection_event();
         }
         Ok(())
+    }
+
+    fn touch_keyboard(&mut self) -> Option<RECT> {
+        let pane = self.input_pane.get_or_insert_with(|| unsafe {
+            CoCreateInstance(&FrameworkInputPane, None, CLSCTX_INPROC_SERVER).ok()
+        });
+        let area = unsafe { pane.as_ref()?.Location() }.ok()?;
+        (area.right > area.left && area.bottom > area.top).then_some(area)
     }
 
     fn row_height(dpi: u32) -> i32 {
@@ -417,6 +482,45 @@ mod tests {
             texts,
             selected: 10,
         }
+    }
+
+    #[test]
+    fn opens_below_the_composition_unless_that_leaves_the_screen_or_covers_the_touch_keyboard() {
+        let rect = |left, top, right, bottom| RECT {
+            left,
+            top,
+            right,
+            bottom,
+        };
+        let size = SIZE { cx: 300, cy: 200 };
+        let screen = rect(0, 0, 1920, 1040);
+        let composition = rect(100, 400, 180, 420);
+        assert_eq!(
+            place(composition, size, 2, screen, None),
+            POINT { x: 100, y: 422 }
+        );
+        let low = rect(100, 900, 180, 920);
+        assert_eq!(place(low, size, 2, screen, None), POINT { x: 100, y: 698 });
+        let keyboard = rect(0, 560, 1920, 1040);
+        assert_eq!(
+            place(composition, size, 2, screen, Some(keyboard)),
+            POINT { x: 100, y: 198 }
+        );
+        let narrow_keyboard = rect(1000, 560, 1920, 1040);
+        assert_eq!(
+            place(composition, size, 2, screen, Some(narrow_keyboard)),
+            POINT { x: 100, y: 422 }
+        );
+        let right_edge = rect(1800, 400, 1880, 420);
+        assert_eq!(
+            place(right_edge, size, 2, screen, None),
+            POINT { x: 1620, y: 422 }
+        );
+        let second_monitor = rect(1920, 0, 3840, 1040);
+        assert_eq!(
+            place(rect(1800, 400, 1880, 420), size, 2, second_monitor, None),
+            POINT { x: 1920, y: 422 }
+        );
     }
 
     #[test]
