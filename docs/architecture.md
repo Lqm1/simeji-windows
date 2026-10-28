@@ -40,7 +40,7 @@ TSFに依存しない層:
 TSF・COMとの接続層:
 
 - `dll`: DLLエントリポイント、クラスファクトリ、アンロード判定。
-- `text_service`: `ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfCompartmentEventSink` などの実装。キーを `composer` に渡し、返された操作を編集セッションで文書へ適用する。確定時の学習とクラウド照会は、入力スコープが許す場合だけ行う。
+- `text_service`: `ITfTextInputProcessorEx`、`ITfKeyEventSink`、`ITfCompartmentEventSink` などの実装。キーを `composer` に渡し、返された操作を編集セッションで文書へ適用する。確定時の学習とクラウド照会は、入力スコープが許す場合だけ行う。入力スコープは、Microsoftの資料どおりアプリのプロパティ（`ITfContext::GetAppProperty`）として読む。
 - `input_mode`、`mode_icon`: 日本語入力のオン・オフをTSFのコンパートメント（`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`）で管理する。アプリ・入力インジケーター・タッチキーボードからの変更にも従い、オフにすると入力中の文字を確定する。入力インジケーターには `GUID_LBI_INPUTMODE` のボタンとして「あ」「A」のアイコン（実行時に描画）を表示し、クリックで切り替える。有効化時は日本語入力をオンにする。
 - `edit_session`: 未確定文字の書き込み、表示属性、キャレット、候補ウィンドウの位置。
 - `candidate_window`: アプリのウィンドウに所有される独自クラスのウィンドウ。システムの配色で描き、選択中の候補を強調する。モニターのDPIに合わせて拡大し、表示・移動・非表示を `EVENT_OBJECT_IME_SHOW`・`EVENT_OBJECT_IME_CHANGE`・`EVENT_OBJECT_IME_HIDE` で通知する。クラス名にモジュールのアドレスを含め、別のアドレスで読み込まれた以前のDLLのクラスを使わない。
@@ -75,7 +75,7 @@ TSF・COMとの接続層:
 
 ## 配置と権限
 
-`scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、プログラムと辞書を `%ProgramFiles%\SimejiWindows` に配置する。Program Files はAppContainerから読めるため、Microsoftの要件どおり辞書をここに置く。アプリが読み込んだままのDLLは上書きできないので、名前を変えて退避し、次回のインストールで削除する。
+`scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、プログラムと辞書を `%ProgramFiles%\SimejiWindows` に配置する。Program Files はAppContainerから読めるため、Microsoftの要件どおり辞書をここに置く。アプリが読み込んだままのDLLなど使用中のファイルは、`simeji-setup remove` が名前を変えて退避し、Windowsの再起動時に削除されるよう登録する。元の名前のまま登録すると、その後に再インストールしたファイルが再起動時に削除されるため。アンインストールと以前の `Versions` の削除も同じ方法を使う。
 
 `simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。入力インジケーターのブランドアイコン（白い四角に黒い「S」）は、ビルドスクリプトがMicrosoftの指定する16〜48ピクセルで描いてDLLのリソースに含め、プロファイルはその最初のアイコンを指す。カテゴリはキーボード（`GUID_TFCAT_TIP_KEYBOARD`）と表示属性に加え、Windowsストアアプリ対応（`IMMERSIVESUPPORT`）、入力インジケーター対応（`SYSTRAYSUPPORT`）、入力モードのコンパートメント（`INPUTMODECOMPARTMENT`）、COMを介さない読み込み（`COMLESS`）、UIレスモード（`UIELEMENTENABLED`）を登録する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
 
