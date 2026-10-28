@@ -22,7 +22,7 @@ Windows IMEとして標準的な形にそろえた。プログラムは `%Progra
 
 - 確認済み: 書式・lint・全テスト、パッケージ作成と `simeji-setup verify`、パッケージのワーカーを新しいパイプで起動し、Ping・変換・ユーザー辞書登録・ランチャーの重複起動防止・データ配置を確認した。
 - 未確認: 管理者権限での `install.ps1`・`uninstall.ps1`、`HKLM` への登録と `InstallLayoutOrTip`、アプリでの入力、AppContainerアプリからの接続。
-- 以前の版とは互換性がない。旧版の `%LOCALAPPDATA%\SimejiWindows\Versions` と `UserData` は新しい版では使わない。旧版をアンインストールしてから導入し、学習データを引き継ぐ場合は旧 `UserData` 内の学習ファイルを `Learning\` へ、`user-dictionary.json` を `%LOCALAPPDATA%\SimejiWindows` へ移す。
+- 以前の版のユーザー単位のインストールからは、`install.ps1` がそのまま移行する。旧 `UserData` の学習ファイルを `Learning\` へ、`user-dictionary.json` を `%LOCALAPPDATA%\SimejiWindows` へ移し、`cloud-enabled.json` を `settings.json` に変換し、旧キャッシュと旧 `Versions` を削除する。同じCLSIDの登録とユーザー単位の自動起動は新しい登録で置き換える。利用者の実データの複製で移行を実行し、新しいワーカーが設定とユーザー辞書を読めることを確認した。
 
 ## TSFの標準機能
 

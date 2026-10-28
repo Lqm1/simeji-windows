@@ -77,6 +77,8 @@ TSF・COMとの接続層:
 
 `simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。入力インジケーターのブランドアイコン（白い四角に黒い「S」）は、ビルドスクリプトがMicrosoftの指定する16〜48ピクセルで描いてDLLのリソースに含め、プロファイルはその最初のアイコンを指す。カテゴリはキーボード（`GUID_TFCAT_TIP_KEYBOARD`）と表示属性に加え、Windowsストアアプリ対応（`IMMERSIVESUPPORT`）、入力インジケーター対応（`SYSTRAYSUPPORT`）、入力モードのコンパートメント（`INPUTMODECOMPARTMENT`）、COMを介さない読み込み（`COMLESS`）を登録する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
 
+`install.ps1` は `migrate-user-data.ps1` で、以前のユーザー単位のインストール（`UserData` と `Versions`）を新しい配置へ移す。
+
 ユーザーデータは `%LOCALAPPDATA%\SimejiWindows` に置く。`settings.json`（設定）、`user-dictionary.json`（ユーザー辞書）、`Learning\`（エンジンの学習データ）、`Cache\`（削除可能なクラウドキャッシュ）に分ける。
 
 ワーカーは入力先アプリと接続できる通常権限で起動する。インストールに管理者権限が必要なことと、常駐ワーカーを管理者として起動することは別である。
