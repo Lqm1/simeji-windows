@@ -42,6 +42,27 @@ impl SearchConverter for Worker {
     }
 }
 
+/// Distinct conversions of the whole reading, as Microsoft asks of search
+/// candidates: a prediction, or a candidate that extends another one, would
+/// only narrow the results.
+fn search_alternatives(reading: &str, candidates: Vec<Candidate>) -> Vec<Candidate> {
+    let mut distinct: Vec<Candidate> = Vec::new();
+    for candidate in candidates {
+        if candidate.reading == reading && distinct.iter().all(|kept| kept.text != candidate.text) {
+            distinct.push(candidate);
+        }
+    }
+    let texts: Vec<String> = distinct.iter().map(|kept| kept.text.clone()).collect();
+    distinct
+        .into_iter()
+        .filter(|candidate| {
+            !texts
+                .iter()
+                .any(|other| *other != candidate.text && candidate.text.starts_with(other.as_str()))
+        })
+        .collect()
+}
+
 #[implement(
     ITfFunctionProvider,
     ITfFnGetPreferredTouchKeyboardLayout,
@@ -118,10 +139,12 @@ impl ITfFnSearchCandidateProvider_Impl for Functions_Impl {
         let candidates = if query.is_empty() {
             Vec::new()
         } else {
-            self.converter
+            let candidates = self
+                .converter
                 .borrow_mut()
                 .search_candidates(&query)
-                .unwrap_or_default()
+                .unwrap_or_default();
+            search_alternatives(&query, candidates)
         };
         let texts = candidates
             .iter()
@@ -308,6 +331,34 @@ mod tests {
         fn learn_choice(&mut self, candidate: Candidate) {
             self.learned.borrow_mut().push(candidate.text);
         }
+    }
+
+    fn candidate(text: &str, reading: &str) -> Candidate {
+        Candidate {
+            text: text.into(),
+            reading: reading.into(),
+            property: 0,
+            left_id: 0,
+            right_id: 0,
+        }
+    }
+
+    #[test]
+    fn search_gets_distinct_conversions_without_extensions_or_predictions() {
+        let candidates = [
+            ("北京大学", "ぺきん"),
+            ("北京", "ぺきん"),
+            ("ぺきん", "ぺきん"),
+            ("北京", "ぺきん"),
+            ("北京市", "ぺきんし"),
+            ("ペキン", "ぺきん"),
+        ]
+        .map(|(text, reading)| candidate(text, reading));
+        let texts: Vec<_> = search_alternatives("ぺきん", candidates.to_vec())
+            .into_iter()
+            .map(|candidate| candidate.text)
+            .collect();
+        assert_eq!(texts, ["北京", "ぺきん", "ペキン"]);
     }
 
     fn provider() -> (ITfFunctionProvider, Rc<RefCell<Vec<String>>>) {
