@@ -35,5 +35,5 @@ if (Test-Path -LiteralPath $old) {
 }
 $versions = Join-Path $root 'Versions'
 if (Test-Path -LiteralPath $versions) {
-    Remove-Item -LiteralPath $versions -Recurse -Force -ErrorAction SilentlyContinue
+    & (Join-Path $PSScriptRoot 'simeji-setup.exe') remove $versions
 }

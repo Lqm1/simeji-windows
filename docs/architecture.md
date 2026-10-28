@@ -75,7 +75,7 @@ TSF・COMとの接続層:
 
 ## 配置と権限
 
-`scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、プログラムと辞書を `%ProgramFiles%\SimejiWindows` に配置する。Program Files はAppContainerから読めるため、Microsoftの要件どおり辞書をここに置く。アプリが読み込んだままのDLLは上書きできないので、名前を変えて退避し、次回のインストールで削除する。
+`scripts/build.ps1` はローカル用パッケージを作る。インストーラーは管理者権限で実行し、プログラムと辞書を `%ProgramFiles%\SimejiWindows` に配置する。Program Files はAppContainerから読めるため、Microsoftの要件どおり辞書をここに置く。アプリが読み込んだままのDLLなど使用中のファイルは、`simeji-setup remove` が名前を変えて退避し、Windowsの再起動時に削除されるよう登録する。元の名前のまま登録すると、その後に再インストールしたファイルが再起動時に削除されるため。アンインストールと以前の `Versions` の削除も同じ方法を使う。
 
 `simeji-setup register` はCOMクラスを `HKLM` に、TSFプロファイルとカテゴリをすべてのユーザー向けに登録し、`InstallLayoutOrTip` で実行したユーザーの入力方式に追加する。ユーザー単位のCOM登録はコンピューター全体の登録より優先されるため、登録・解除の両方で削除する。入力インジケーターのブランドアイコン（白い四角に黒い「S」）は、ビルドスクリプトがMicrosoftの指定する16〜48ピクセルで描いてDLLのリソースに含め、プロファイルはその最初のアイコンを指す。カテゴリはキーボード（`GUID_TFCAT_TIP_KEYBOARD`）と表示属性に加え、Windowsストアアプリ対応（`IMMERSIVESUPPORT`）、入力インジケーター対応（`SYSTRAYSUPPORT`）、入力モードのコンパートメント（`INPUTMODECOMPARTMENT`）、COMを介さない読み込み（`COMLESS`）、UIレスモード（`UIELEMENTENABLED`）を登録する。ワーカーの自動起動は `HKLM` の `Run` に登録する。
 
