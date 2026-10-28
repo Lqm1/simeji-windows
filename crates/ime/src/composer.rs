@@ -423,7 +423,9 @@ impl Composer {
             self.cloud_candidates = candidates;
             self.suggestions
                 .append_cloud(&self.cloud_candidates, reading);
-            if let Some(conversion) = self.conversion.as_mut() {
+            if let Some(conversion) = self.conversion.as_mut()
+                && !conversion.candidates.is_empty()
+            {
                 conversion
                     .candidates
                     .append_cloud(&self.cloud_candidates, reading);
@@ -926,6 +928,33 @@ mod tests {
                 text: "今日は晴れ".into(),
                 learn: vec![]
             }]
+        );
+    }
+
+    #[test]
+    fn cloud_after_clause_navigation_does_not_prevent_loading_local_alternatives() {
+        let (mut composer, mut converter) = converted();
+        composer.set_cloud_enabled(true);
+        press(&mut composer, &mut converter, Key::Right { shift: false });
+        composer.take_effects();
+        composer.receive_cloud_candidates(
+            "kyouha",
+            vec![CloudCandidate {
+                text: "今日は晴れ".into(),
+                reading: "kyouha".into(),
+                property: 0,
+                kind: 0,
+                scene: String::new(),
+            }],
+        );
+        assert!(shown(&mut composer).candidates.is_none());
+        press(&mut composer, &mut converter, DOWN);
+        let candidates = shown(&mut composer).candidates.unwrap();
+        assert!(candidates.texts.iter().any(|text| text == "は"));
+        assert!(candidates.texts.iter().any(|text| text == "今日は晴れ"));
+        assert_eq!(
+            converter.candidate_requests.last(),
+            Some(&("ha".into(), "今日".into()))
         );
     }
 
