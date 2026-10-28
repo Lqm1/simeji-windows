@@ -15,6 +15,7 @@
 //!   the `candidate_window`, `input_scope` checks, the `cloud_timer` and
 //!   [`registration`] for `simeji-setup`.
 
+mod candidate_accessibility;
 mod candidate_window;
 mod candidates;
 mod cloud_timer;

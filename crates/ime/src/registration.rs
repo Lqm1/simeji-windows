@@ -7,7 +7,7 @@ use windows::{
     Win32::{
         Foundation::*,
         System::{Com::*, LibraryLoader::*, Registry::*},
-        UI::TextServices::*,
+        UI::{TextServices::*, WindowsAndMessaging::RT_GROUP_ICON},
     },
     core::*,
 };
@@ -23,6 +23,9 @@ const CATEGORIES: [&GUID; 6] = [
     &GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
     &GUID_TFCAT_TIPCAP_COMLESS,
 ];
+/// The icon group the input indicator shows for the profile, linked by the
+/// build script; the profile refers to it as the first icon of the DLL.
+const BRAND_ICON: usize = 1;
 /// `InstallLayoutOrTip` flag that removes the input method instead.
 const ILOT_UNINSTALL: u32 = 0x1;
 
@@ -55,6 +58,15 @@ pub fn verify(path: &Path) -> Result<()> {
             let _: ITfCompartmentEventSink = service.cast()?;
             let _: ITfCompositionSink = service.cast()?;
             let _: ITfDisplayAttributeProvider = service.cast()?;
+            if FindResourceW(
+                Some(module),
+                PCWSTR(BRAND_ICON as *const u16),
+                RT_GROUP_ICON,
+            )
+            .is_invalid()
+            {
+                return Err(Error::new(E_FAIL, "Packaged COM DLL has no branding icon"));
+            }
             drop(service);
             drop(factory);
             if can_unload() != S_OK {
