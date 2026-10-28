@@ -213,6 +213,7 @@ impl Composer {
             Key::Right { .. } => self.move_caret_right(),
             Key::Home => self.move_caret_home(),
             Key::End | Key::Down { .. } => self.move_caret_end(),
+            Key::NextCandidatePage | Key::PreviousCandidatePage => self.convert(converter)?,
             Key::Up { .. } | Key::ToggleInputMode => {}
         }
         Ok(true)
@@ -244,8 +245,10 @@ impl Composer {
             Key::Space { shift: true } | Key::Up { shift: false } => {
                 self.move_selection(-1, converter)?;
             }
-            Key::Down { shift: true } => self.move_page(1, converter)?,
-            Key::Up { shift: true } => self.move_page(-1, converter)?,
+            Key::Down { shift: true } | Key::NextCandidatePage => self.move_page(1, converter)?,
+            Key::Up { shift: true } | Key::PreviousCandidatePage => {
+                self.move_page(-1, converter)?;
+            }
             Key::Left { shift: false } => self.focus_clause(|focus, _| focus.saturating_sub(1)),
             Key::Right { shift: false } => self.focus_clause(|focus, last| (focus + 1).min(last)),
             Key::Home => self.focus_clause(|_, _| 0),
@@ -1270,6 +1273,17 @@ mod tests {
         );
         composer.act(CandidateAction::Commit);
         assert!(composer.take_effects().is_empty());
+    }
+
+    #[test]
+    fn touch_keyboard_page_keys_convert_and_turn_pages() {
+        let (mut composer, mut converter) = (Composer::new(), Fake::new());
+        type_text(&mut composer, &mut converter, "kyouha");
+        composer.take_effects();
+        press(&mut composer, &mut converter, Key::NextCandidatePage);
+        assert_eq!(shown(&mut composer).text, "今日は");
+        press(&mut composer, &mut converter, Key::NextCandidatePage);
+        assert!(shown(&mut composer).candidates.is_some());
     }
 
     #[test]

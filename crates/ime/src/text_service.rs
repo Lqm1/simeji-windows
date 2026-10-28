@@ -10,6 +10,7 @@ use crate::{
     display_attributes::{self, AttributeAtoms},
     dll::DllRef,
     edit_session::{Edit, EditSession},
+    functions::Functions,
     input_mode::{self, InputModeButton},
     keys::{self, Key, Modifiers},
     worker::Worker,
@@ -128,13 +129,13 @@ impl TextService {
 }
 
 impl TextService_Impl {
-    fn wants_key(&self, vk: u32) -> bool {
-        keys::classify(vk, Modifiers::current())
+    fn wants_key(&self, vk: u32, lparam: LPARAM) -> bool {
+        keys::read(vk, lparam, Modifiers::current())
             .is_some_and(|key| self.shared.composer.borrow().accepts(key))
     }
 
     fn handle_key(&self, context: &ITfContext, vk: u32, lparam: LPARAM) -> Result<BOOL> {
-        let Some(key) = keys::classify(vk, Modifiers::current()) else {
+        let Some(key) = keys::read(vk, lparam, Modifiers::current()) else {
             return Ok(false.into());
         };
         let before = self.shared.composer.borrow().clone();
@@ -219,6 +220,25 @@ impl TextService_Impl {
                 && state.shown
             {
                 let _ = items.RemoveItem(&state.button.to_interface::<ITfLangBarItemButton>());
+            }
+        }
+    }
+
+    /// Offers the function provider for the touch keyboard and search. The
+    /// IME works without it, so a failure does not fail the activation.
+    fn advise_functions(thread: &ITfThreadMgr, client_id: u32) {
+        let functions: ITfFunctionProvider = Functions::new().into();
+        if let Ok(source) = thread.cast::<ITfSourceSingle>() {
+            unsafe {
+                let _ = source.AdviseSingleSink(client_id, &ITfFunctionProvider::IID, &functions);
+            }
+        }
+    }
+
+    fn unadvise_functions(thread: &ITfThreadMgr, client_id: u32) {
+        if let Ok(source) = thread.cast::<ITfSourceSingle>() {
+            unsafe {
+                let _ = source.UnadviseSingleSink(client_id, &ITfFunctionProvider::IID);
             }
         }
     }
@@ -417,6 +437,7 @@ impl ITfTextInputProcessor_Impl for TextService_Impl {
         self.ui_elements.borrow_mut().take();
         if let Some(thread) = thread {
             self.deactivate_input_mode(&thread);
+            Self::unadvise_functions(&thread, self.client_id.get());
             let keystrokes: ITfKeystrokeMgr = thread.cast()?;
             unsafe {
                 keystrokes.UnadviseKeyEventSink(self.client_id.get())?;
@@ -438,6 +459,7 @@ impl ITfTextInputProcessorEx_Impl for TextService_Impl {
         self.client_id.set(client);
         *self.thread_manager.borrow_mut() = Some(thread.clone());
         *self.ui_elements.borrow_mut() = thread.cast().ok();
+        Self::advise_functions(thread, client);
         *self.cloud_timer.borrow_mut() = CloudTimer::start(&self.shared);
         self.activate_input_mode(thread, client)
     }
@@ -506,13 +528,13 @@ impl ITfKeyEventSink_Impl for TextService_Impl {
         }
         Ok(())
     }
-    fn OnTestKeyDown(&self, context: Ref<ITfContext>, key: WPARAM, _flags: LPARAM) -> Result<BOOL> {
+    fn OnTestKeyDown(&self, context: Ref<ITfContext>, key: WPARAM, flags: LPARAM) -> Result<BOOL> {
         let editable = context.as_ref().is_some_and(|context| unsafe {
             context
                 .GetStatus()
                 .is_ok_and(|status| status.dwStaticFlags & TF_SD_READONLY == 0)
         });
-        Ok((editable && self.wants_key(key.0 as u32)).into())
+        Ok((editable && self.wants_key(key.0 as u32, flags)).into())
     }
     fn OnTestKeyUp(&self, _context: Ref<ITfContext>, _key: WPARAM, _flags: LPARAM) -> Result<BOOL> {
         Ok(false.into())
